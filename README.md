@@ -9,9 +9,11 @@ Goodnotes / フリーボード風の無限キャンバス・ノートアプリ�
 ## 進捗
 
 - [x] ① ファイル・フォルダ管理(サイドバー無限階層 / グリッド / ゴミ箱 / タブ骨格)
-- [ ] ② 無限キャンバス(PencilKit + ズーム / スクロール / 自動保存)
-- [ ] ③ オブジェクト配置(テキスト / 画像 / PDF)+ カスタムペンツールバー
-- [ ] ④ スナップ機能 / 背景テンプレート
+- [x] ② 無限キャンバス(PencilKit + ズーム / スクロール / 自動保存 / サムネイル生成)
+- [x] ③ カスタムペンツールバー(ペン / マーカー / 消しゴム・太さ3スロット・カラーパレット)
+- [x] ④ 背景テンプレート(白紙 / 方眼 / ドット)
+- [ ] ③ オブジェクト配置(テキスト / 画像 / PDF)← 次: UI/UX設計案の承認から
+- [ ] ④ オブジェクトのスナップ(吸着)← オブジェクト配置とセットで実装
 
 ## ディレクトリ構成
 
@@ -36,7 +38,7 @@ Sources/
     ├── Sidebar/                         # 再帰ツリー (DisclosureGroup)
     ├── Library/                         # サムネイルグリッド
     ├── Trash/                           # ゴミ箱 (復元 / 完全削除)
-    ├── Canvas/                          # タブバー + キャンバス(②で実装)
+    ├── Canvas/                          # 無限キャンバス / ペンツールバー / タブバー
     └── Common/                          # ダイアログ / 移動先ピッカー
 ```
 
@@ -64,6 +66,32 @@ Sources/
 7. iPad シミュレーターで実行
 8. ビルドが通ったら Integrate → Commit… で `.xcodeproj` をコミット & プッシュ
    (以後 Windows 側の変更は Xcode の Integrate → Pull だけで取り込める)
+
+## Pull 後に Xcode 側で必要な作業(重要)
+
+Xcode に「グループ」として追加したフォルダは、**Windows 側で後から増えたファイルを自動では取り込まない**。
+Pull 後、以下の新規ファイルを Finder から `Views/Canvas` グループへドラッグしてターゲットに追加すること:
+
+- `Sources/Views/Canvas/PenToolState.swift`
+- `Sources/Views/Canvas/PenToolbarView.swift`
+- `Sources/Views/Canvas/CanvasRepresentable.swift`
+- `Sources/Views/Canvas/NoteCanvasView.swift`
+
+データモデル(`NoteFile` に `canvasData` / `backgroundStyle` を追加)は軽量マイグレーションで
+自動移行されるため、シミュレーターのデータ削除は不要。
+
+## 設計メモ (②③④)
+
+- **無限キャンバス**: PKCanvasView は UIScrollView のサブクラスであることを利用し、
+  contentSize 100,000×100,000pt + zoomScale 0.1〜5.0 の疑似無限キャンバス。初期位置は中央
+- **ペンツール**: PKToolPicker 不使用。`PenToolState` が太さ/色をツールごとに記憶し、
+  `PKInkingTool` / `PKEraserTool` を生成して `PKCanvasView.tool` に反映
+- **自動保存**: 描画変更から 0.8 秒デバウンスで `PKDrawing.dataRepresentation()` を
+  `NoteFile.canvasData` に保存 + サムネイル生成。タブ切替・ライブラリ復帰時は即時保存
+- **背景**: スクリーン空間で描画する `BackgroundPatternUIView` が contentOffset / zoomScale に
+  追従(KVO)。ズームアウト時は格子間隔を自動で粗くする
+- **ビューポート**: タブごとのスクロール位置・ズームを `OpenNotesSession.viewports` に保持
+  (アプリ再起動後の復元は未実装)
 
 ## 設計メモ (①)
 

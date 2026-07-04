@@ -1,14 +1,18 @@
 import SwiftUI
 import CoreData
+import PencilKit
 
 /// ノートを開いたときのディテール領域。
 /// 承認済みレイアウト: ナビバー → ペンツールバー(上) → タブバー(下) → キャンバス。
 struct CanvasTabsView: View {
     @EnvironmentObject private var session: OpenNotesSession
+    @Environment(\.managedObjectContext) private var context
+    @StateObject private var toolState = PenToolState()
+    @State private var isToolbarCollapsed = false
 
     var body: some View {
         VStack(spacing: 0) {
-            PenToolbarPlaceholder()
+            PenToolbarView(toolState: toolState, isCollapsed: $isToolbarCollapsed)
             Divider()
             NoteTabBar()
             canvasArea
@@ -24,56 +28,51 @@ struct CanvasTabsView: View {
                         .labelStyle(.titleAndIcon)
                 }
             }
+            ToolbarItem(placement: .primaryAction) {
+                backgroundMenu
+            }
         }
     }
 
     @ViewBuilder
     private var canvasArea: some View {
         if let note = session.selectedNote {
-            ContentUnavailableView {
-                Label("無限キャンバス", systemImage: "scribble.variable")
-            } description: {
-                Text("「\(note.displayTitle)」のキャンバスは ② 無限キャンバス機能で実装予定")
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(.systemBackground))
+            NoteCanvasView(note: note, toolState: toolState)
+                // タブ切替時はビューを作り直す(ビューポートは session から復元される)
+                .id(note.objectID)
         }
     }
-}
 
-/// ③ で実装するカスタムペンツールバーのプレースホルダ(レイアウト確認用・操作不可)
-struct PenToolbarPlaceholder: View {
-    var body: some View {
-        HStack(spacing: 16) {
-            HStack(spacing: 12) {
-                Image(systemName: "pencil.tip")
-                Image(systemName: "highlighter")
-                Image(systemName: "eraser")
+    // MARK: - 背景テンプレート切替(要件④)
+
+    private var backgroundMenu: some View {
+        Menu {
+            ForEach(CanvasBackgroundStyle.allCases, id: \.self) { style in
+                Button {
+                    setBackground(style)
+                } label: {
+                    if currentBackground == style {
+                        Label(style.label, systemImage: "checkmark")
+                    } else {
+                        Text(style.label)
+                    }
+                }
             }
-            Divider().frame(height: 20)
-            HStack(spacing: 10) {
-                Circle().frame(width: 6, height: 6)
-                Circle().frame(width: 9, height: 9)
-                Circle().frame(width: 12, height: 12)
-            }
-            Divider().frame(height: 20)
-            HStack(spacing: 8) {
-                Circle().fill(.red).frame(width: 16, height: 16)
-                Circle().fill(.blue).frame(width: 16, height: 16)
-                Circle().fill(.black).frame(width: 16, height: 16)
-                Image(systemName: "plus.circle")
-            }
-            Spacer()
-            Text("ツールバーは ③ で実装")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+        } label: {
+            Label("背景", systemImage: "squareshape.split.3x3")
         }
-        .font(.body)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
-        .allowsHitTesting(false)
+        .disabled(session.selectedNote == nil)
+    }
+
+    private var currentBackground: CanvasBackgroundStyle {
+        CanvasBackgroundStyle(rawValue: session.selectedNote?.backgroundStyle ?? "") ?? .blank
+    }
+
+    private func setBackground(_ style: CanvasBackgroundStyle) {
+        guard let note = session.selectedNote else { return }
+        note.backgroundStyle = style.rawValue
+        note.updatedAt = .now
+        try? context.save()
     }
 }
 
@@ -140,10 +139,6 @@ private struct NoteTabChip: View {
         .onTapGesture(perform: onSelect)
         .contextMenu {
             Button("このタブを閉じる", action: onClose)
-            Button("ライブラリで表示") {
-                // TODO: サイドバー選択との連携は後続フェーズで実装
-            }
-            .disabled(true)
         }
     }
 }

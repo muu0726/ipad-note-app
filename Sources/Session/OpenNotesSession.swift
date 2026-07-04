@@ -9,6 +9,9 @@ final class OpenNotesSession: ObservableObject {
     @Published var selectedNote: NoteFile?
     /// true のときディテール領域にキャンバス(タブ)を表示する
     @Published var isCanvasVisible = false
+    /// タブごとのビューポート(スクロール位置・ズーム)。
+    /// 描画のたびに更新されるため @Published にはしない(再描画ループ防止)
+    var viewports: [NSManagedObjectID: CanvasViewport] = [:]
 
     /// ノートをタブで開く。既に開いていればそのタブへ切り替える(重複タブは作らない)
     func open(_ note: NoteFile) {

@@ -13,6 +13,8 @@
         <relationship name="parent" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Folder" inverseName="children" inverseEntity="Folder"/>
     </entity>
     <entity name="NoteFile" representedClassName="NoteFile" syncable="YES" codeGenerationType="class">
+        <attribute name="backgroundStyle" optional="YES" attributeType="String" defaultValueString="blank"/>
+        <attribute name="canvasData" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="isTrashed" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
