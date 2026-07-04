@@ -2,7 +2,8 @@
 
 Goodnotes / フリーボード風の無限キャンバス・ノートアプリ。
 
-- **スタック**: SwiftUI / PencilKit / Core Data + CloudKit / iPadOS 17+
+- **スタック**: SwiftUI / PencilKit / Core Data / iPadOS 17+
+  (CloudKit 同期は有料 Developer アカウント取得後に有効化。現在はローカル保存のみ)
 - **ワークフロー**: Windows で開発 → GitHub → MacBook (Xcode) でビルド・実機確認
 
 ## 進捗
@@ -19,7 +20,7 @@ Sources/
 ├── App/
 │   └── InfiniteCanvasNoteApp.swift      # エントリポイント
 ├── Persistence/
-│   ├── PersistenceController.swift      # Core Data + CloudKit スタック
+│   ├── PersistenceController.swift      # Core Data スタック(ローカル保存)
 │   └── InfiniteCanvas.xcdatamodeld/     # データモデル (Folder / NoteFile)
 ├── Models/
 │   ├── Folder+Helpers.swift             # 階層取得・循環参照チェック
@@ -55,11 +56,12 @@ Sources/
    - 「Copy items if needed」は **オフ**(リポジトリ内のファイルをそのまま参照)
    - 「Create groups」を選択し、ターゲット `InfiniteCanvasApp` に追加
    - `InfiniteCanvas.xcdatamodeld` がターゲットに含まれていることを確認
-5. **Signing & Capabilities** で以下を追加:
-   - `iCloud` → CloudKit にチェック → コンテナ `iCloud.<バンドルID>` を作成
-   - `Background Modes` → Remote notifications にチェック
+5. ~~Signing & Capabilities で iCloud / Background Modes を追加~~
+   → **無料アカウント(Personal Team)では不要・不可。** 有料アカウント取得後に
+   iCloud (CloudKit) + Background Modes (Remote notifications) を追加し、
+   `PersistenceController` の `NSPersistentContainer` を `NSPersistentCloudKitContainer` に戻す
 6. Deployment Target を **iOS 17.0** に設定
-7. iPad シミュレーターで実行(CloudKit 同期の確認は iCloud サインイン済みの実機推奨)
+7. iPad シミュレーターで実行
 8. ビルドが通ったら Integrate → Commit… で `.xcodeproj` をコミット & プッシュ
    (以後 Windows 側の変更は Xcode の Integrate → Pull だけで取り込める)
 
@@ -69,6 +71,7 @@ Sources/
 - **ゴミ箱**: 物理削除せず `isTrashed` フラグをサブツリーへ再帰設定。
   復元はフラグ解除(親が消えていればルートへ)。完全削除は Cascade ルールで中身ごと削除
 - **CloudKit 制約対応**: 全属性 optional / デフォルト値あり、全リレーションに inverse 設定済み
+  (データモデルは CloudKit 対応のまま。コンテナだけローカル用 `NSPersistentContainer` に差し替え中)
 - **タブ**: `OpenNotesSession` が開いているノート配列と選択状態を保持。
   レイアウトは「ナビバー → ペンツールバー → タブバー → キャンバス」の順(承認済み)
 
@@ -77,4 +80,4 @@ Sources/
 - [ ] ビルドが通ること(コード生成: xcdatamodeld の codeGenerationType=class に依存)
 - [ ] サイドバーの DisclosureGroup ラベルへの `.tag()` によるフォルダ選択が効くこと
       (効かない場合はラベルを Button 化して手動選択に切り替える)
-- [ ] iCloud 同期(実機 2 台または実機+シミュレーター)
+- [ ] iCloud 同期(有料 Developer アカウント取得後に実施)

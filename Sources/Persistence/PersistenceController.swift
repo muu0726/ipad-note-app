@@ -1,23 +1,30 @@
 import CoreData
 
-/// Core Data + CloudKit スタックの管理。
+/// Core Data スタックの管理(現在は **ローカル保存のみ**)。
 /// モデル名は `InfiniteCanvas.xcdatamodeld` と一致させること。
+///
+/// 無料アカウント(Personal Team)では iCloud Capability を追加できないため
+/// `NSPersistentContainer` を使用している。
+/// 有料 Developer アカウント取得後に CloudKit 同期へ切り替える手順:
+///   1. Signing & Capabilities で iCloud (CloudKit) + Background Modes (Remote notifications) を追加
+///   2. 下の `NSPersistentContainer` を `NSPersistentCloudKitContainer` に変更
+///   (履歴トラッキング等のオプションは設定済みのため、他の変更は不要)
 struct PersistenceController {
     static let shared = PersistenceController()
 
-    let container: NSPersistentCloudKitContainer
+    let container: NSPersistentContainer
 
     init(inMemory: Bool = false) {
-        container = NSPersistentCloudKitContainer(name: "InfiniteCanvas")
+        container = NSPersistentContainer(name: "InfiniteCanvas")
 
         guard let description = container.persistentStoreDescriptions.first else {
             fatalError("永続ストアの記述が見つかりません")
         }
         if inMemory {
             description.url = URL(fileURLWithPath: "/dev/null")
-            description.cloudKitContainerOptions = nil
         }
-        // CloudKit 同期に必須のオプション
+        // 将来の CloudKit 切り替えに備えて履歴トラッキングを最初から有効化しておく
+        // (途中から有効化するとストア移行が必要になるため。ローカル運用でも無害)
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 

@@ -1,4 +1,6 @@
 import Foundation
+import Combine
+import CoreData
 
 /// 開いているノート(タブ)の状態を管理するセッションオブジェクト。
 /// タブの並び・選択中タブ・キャンバス表示状態を保持する。

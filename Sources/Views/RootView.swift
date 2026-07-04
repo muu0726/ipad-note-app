@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreData
 
 /// サイドバーで選択できる対象
 enum SidebarSelection: Hashable {

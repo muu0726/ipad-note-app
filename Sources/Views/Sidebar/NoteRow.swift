@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreData
 
 /// サイドバー内のノート行。タップでタブとして開く(選択状態にはしない)。
 struct NoteRow: View {

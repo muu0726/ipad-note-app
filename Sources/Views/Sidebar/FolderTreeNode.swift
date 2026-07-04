@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreData
 
 /// サイドバーの再帰的なフォルダツリーノード。
 /// 子フォルダ・子ノートは Core Data リレーションから取得し、
