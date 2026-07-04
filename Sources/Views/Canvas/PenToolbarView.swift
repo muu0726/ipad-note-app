@@ -12,10 +12,12 @@ struct PenToolbarView: View {
         HStack(spacing: 0) {
             if !isCollapsed {
                 toolButtons
-                barDivider
-                widthSlots
-                barDivider
-                colorPalette
+                if toolState.tool != .selector {
+                    barDivider
+                    widthSlots
+                    barDivider
+                    colorPalette
+                }
             }
             Spacer(minLength: 8)
             Button {
@@ -41,6 +43,7 @@ struct PenToolbarView: View {
 
     private var toolButtons: some View {
         HStack(spacing: 4) {
+            toolButton(.selector, icon: "cursorarrow")
             toolButton(.pen, icon: "pencil.tip")
             toolButton(.marker, icon: "highlighter")
             toolButton(.eraser, icon: "eraser")

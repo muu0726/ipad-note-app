@@ -1,17 +1,29 @@
 import SwiftUI
 import PencilKit
 import CoreData
+import PhotosUI
+import UIKit
 
 /// 1つのノートの無限キャンバス。
-/// 描画変更を自動保存(0.8秒デバウンス)し、サムネイルも更新する(要件②の Auto-save)。
+/// レイヤー構成(下から): 背景パターン → オブジェクト → 手書き(PKCanvasView)。
+/// 描画変更は自動保存(0.8秒デバウンス)し、サムネイルも更新する(要件②の Auto-save)。
 struct NoteCanvasView: View {
     @ObservedObject var note: NoteFile
     @ObservedObject var toolState: PenToolState
     @EnvironmentObject private var session: OpenNotesSession
     @Environment(\.managedObjectContext) private var context
 
+    @StateObject private var viewportState = CanvasViewportState()
     @State private var drawing: PKDrawing
+    @State private var drawingVersion = 0
     @State private var saveTask: Task<Void, Never>?
+
+    // オブジェクト操作の状態
+    @State private var selectedObjectID: NSManagedObjectID?
+    @State private var editingObjectID: NSManagedObjectID?
+    @State private var isPhotoPickerPresented = false
+    @State private var photoItem: PhotosPickerItem?
+    @State private var isPDFImporterPresented = false
 
     init(note: NoteFile, toolState: PenToolState) {
         _note = ObservedObject(wrappedValue: note)
@@ -23,21 +35,134 @@ struct NoteCanvasView: View {
         }
     }
 
+    private var isSelectMode: Bool { toolState.tool == .selector }
+
+    private var backgroundStyle: CanvasBackgroundStyle {
+        CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank
+    }
+
     var body: some View {
-        CanvasRepresentable(
-            drawing: $drawing,
-            pkTool: toolState.pkTool,
-            backgroundStyle: CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank,
-            initialViewport: session.viewports[note.objectID],
-            onDrawingChanged: scheduleAutoSave,
-            onViewportChanged: { session.viewports[note.objectID] = $0 }
+        GeometryReader { geometry in
+            ZStack {
+                BackgroundPatternLayer(viewportState: viewportState, style: backgroundStyle)
+                CanvasObjectsOverlay(
+                    note: note,
+                    viewportState: viewportState,
+                    selectedObjectID: $selectedObjectID,
+                    editingObjectID: $editingObjectID,
+                    isSelectMode: isSelectMode,
+                    gridSnapEnabled: backgroundStyle != .blank,
+                    onMoveCommitted: handleObjectMoved
+                )
+                CanvasRepresentable(
+                    drawing: $drawing,
+                    drawingVersion: drawingVersion,
+                    pkTool: toolState.pkTool,
+                    isSelectMode: isSelectMode,
+                    viewportState: viewportState,
+                    initialViewport: session.viewports[note.objectID],
+                    onDrawingChanged: scheduleAutoSave,
+                    onViewportChanged: { session.viewports[note.objectID] = $0 }
+                )
+            }
+            .onAppear { viewportState.viewSize = geometry.size }
+            .onChange(of: geometry.size) { _, newSize in
+                viewportState.viewSize = newSize
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) { insertMenu }
+        }
+        .photosPicker(isPresented: $isPhotoPickerPresented, selection: $photoItem, matching: .images)
+        .onChange(of: photoItem) { _, item in
+            handlePickedPhoto(item)
+        }
+        .fileImporter(
+            isPresented: $isPDFImporterPresented,
+            allowedContentTypes: [.pdf],
+            onCompletion: handlePDFImport
         )
+        .onChange(of: toolState.tool) { _, newTool in
+            // 選択モードを抜けたら選択・編集状態も解除
+            if newTool != .selector {
+                selectedObjectID = nil
+                editingObjectID = nil
+            }
+        }
         .onDisappear {
             // タブ切替・ライブラリ復帰時は即時保存
             saveTask?.cancel()
             persist()
         }
     }
+
+    // MARK: - オブジェクト挿入(要件③)
+
+    private var insertMenu: some View {
+        Menu {
+            Button {
+                insertText()
+            } label: {
+                Label("テキスト", systemImage: "textformat")
+            }
+            Button {
+                isPhotoPickerPresented = true
+            } label: {
+                Label("写真", systemImage: "photo")
+            }
+            Button {
+                isPDFImporterPresented = true
+            } label: {
+                Label("PDF", systemImage: "doc.text")
+            }
+        } label: {
+            Image(systemName: "plus")
+        }
+    }
+
+    private func insertText() {
+        let object = CanvasObjectService.createText(
+            in: note, at: viewportState.visibleContentCenter, context: context)
+        toolState.tool = .selector
+        selectedObjectID = object.objectID
+        editingObjectID = object.objectID
+    }
+
+    private func handlePickedPhoto(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task { @MainActor in
+            defer { photoItem = nil }
+            guard let data = try? await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data) else { return }
+            let object = CanvasObjectService.createImage(
+                image, in: note, at: viewportState.visibleContentCenter, context: context)
+            toolState.tool = .selector
+            selectedObjectID = object.objectID
+        }
+    }
+
+    private func handlePDFImport(_ result: Result<URL, Error>) {
+        guard case .success(let url) = result else { return }
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { return }
+        let object = CanvasObjectService.createPDF(
+            data: data, in: note, at: viewportState.visibleContentCenter, context: context)
+        toolState.tool = .selector
+        selectedObjectID = object.objectID
+    }
+
+    /// オブジェクト移動後、旧フレーム内のストロークを追従させる(単一レイヤー要件)
+    private func handleObjectMoved(oldFrame: CGRect, delta: CGPoint) {
+        let result = CanvasObjectService.translateStrokes(in: drawing, within: oldFrame, by: delta)
+        if result.didMove {
+            drawing = result.drawing
+            drawingVersion += 1
+            scheduleAutoSave()
+        }
+    }
+
+    // MARK: - 自動保存
 
     private func scheduleAutoSave() {
         saveTask?.cancel()

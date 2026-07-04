@@ -12,8 +12,8 @@ Goodnotes / フリーボード風の無限キャンバス・ノートアプリ�
 - [x] ② 無限キャンバス(PencilKit + ズーム / スクロール / 自動保存 / サムネイル生成)
 - [x] ③ カスタムペンツールバー(ペン / マーカー / 消しゴム・太さ3スロット・カラーパレット)
 - [x] ④ 背景テンプレート(白紙 / 方眼 / ドット)
-- [ ] ③ オブジェクト配置(テキスト / 画像 / PDF)← 次: UI/UX設計案の承認から
-- [ ] ④ オブジェクトのスナップ(吸着)← オブジェクト配置とセットで実装
+- [x] ③ オブジェクト配置(テキスト / 画像 / PDF、選択ツールで移動・リサイズ・削除)
+- [x] ④ オブジェクトのスナップ(他オブジェクトの端・中心 + グリッドへ吸着、ガイド線表示)
 
 ## ディレクトリ構成
 
@@ -76,6 +76,35 @@ Pull 後、以下の新規ファイルを Finder から `Views/Canvas` グルー
 - `Sources/Views/Canvas/PenToolbarView.swift`
 - `Sources/Views/Canvas/CanvasRepresentable.swift`
 - `Sources/Views/Canvas/NoteCanvasView.swift`
+
+オブジェクト配置(③④)で追加された新規ファイル:
+
+- `Sources/Models/CanvasObject+Helpers.swift`
+- `Sources/Services/CanvasObjectService.swift`
+- `Sources/Views/Canvas/CanvasViewportState.swift`
+- `Sources/Views/Canvas/BackgroundPatternLayer.swift`
+- `Sources/Views/Canvas/CanvasObjectsOverlay.swift`
+- `Sources/Views/Canvas/CanvasObjectContentViews.swift`
+
+※ Xcode 16 以降なら、プロジェクトナビゲータで `Sources` グループを右クリック →
+「Convert to Folder」で同期フォルダに変換しておくと、以後は Pull だけで
+新規ファイルが自動反映される(手動ドラッグ不要になる)。
+
+## 設計メモ (③④ オブジェクト配置・スナップ)
+
+- **レイヤー構成(下から)**: 背景パターン(SwiftUI Canvas) → オブジェクト(SwiftUI) →
+  手書き(PKCanvasView・透明背景)。ストロークは常にオブジェクトの上に見える
+- **座標系**: オブジェクトはコンテンツ座標で保持し、`CanvasViewportState`(KVO で
+  contentOffset / zoomScale を publish)経由でスクリーン座標に変換して追従
+- **選択ツール**: ツールバー左端の矢印。選択モード中は PKCanvasView を無効化し、
+  タップ選択 / ドラッグ移動 / 四隅ハンドルでリサイズ / ✕で削除。空白ドラッグでスクロール
+- **単一レイヤー要件**: オブジェクト移動確定時、旧フレーム内(中心点判定)の
+  ストロークを同じ移動量で平行移動(`CanvasObjectService.translateStrokes`)
+- **スナップ**: 移動中、他オブジェクトの端・中心 ±8pt(スクリーン換算)で吸着し
+  黄色のガイド線を表示。方眼・ドット背景時は 40pt グリッドにも吸着
+- **テキスト / PDF**: ダブルタップで編集モード(テキスト=キーボード編集、PDF=ページめくり)
+- **既知の制限(v1)**: サムネイルは手書きのみ(オブジェクト非含有) /
+  ストローク追従は移動確定時に反映 / リサイズ時のスナップ未対応 / 選択モード中のピンチズーム不可
 
 データモデル(`NoteFile` に `canvasData` / `backgroundStyle` を追加)は軽量マイグレーションで
 自動移行されるため、シミュレーターのデータ削除は不要。

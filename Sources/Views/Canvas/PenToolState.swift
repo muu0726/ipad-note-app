@@ -3,7 +3,7 @@ import PencilKit
 import Combine
 
 enum CanvasTool: String, CaseIterable {
-    case pen, marker, eraser
+    case selector, pen, marker, eraser
 }
 
 enum CanvasBackgroundStyle: String, CaseIterable {
@@ -48,7 +48,7 @@ final class PenToolState: ObservableObject {
 
     var currentColor: UIColor {
         switch tool {
-        case .pen, .eraser: penColor
+        case .pen, .eraser, .selector: penColor
         case .marker: markerColor
         }
     }
@@ -64,7 +64,8 @@ final class PenToolState: ObservableObject {
     /// 現在の状態から PKCanvasView に渡すツールを生成
     var pkTool: PKTool {
         switch tool {
-        case .pen:
+        case .pen, .selector:
+            // 選択モード中はキャンバス操作が無効なのでツールは使われない(ペンを返しておく)
             return PKInkingTool(.pen, color: penColor, width: currentWidth)
         case .marker:
             return PKInkingTool(.marker, color: markerColor, width: currentWidth)
