@@ -15,7 +15,7 @@ Goodnotes / フリーボード風の無限キャンバス・ノートアプリ�
 ## ディレクトリ構成
 
 ```
-InfiniteCanvasApp/
+Sources/
 ├── App/
 │   └── InfiniteCanvasNoteApp.swift      # エントリポイント
 ├── Persistence/
@@ -41,19 +41,27 @@ InfiniteCanvasApp/
 
 ## Mac (Xcode) での組み込み手順
 
-1. Xcode → **New Project → iOS App**
+1. **クローン**: Xcode 起動 → Welcome 画面の「Clone Git Repository…」
+   (またはメニュー Integrate → Clone…)→ `https://github.com/muu0726/ipad-note-app.git` を入力
+   → 保存先(例: `~/Developer`)を選択。クローン後にフォルダが開いたらいったん閉じる
+2. **プロジェクト作成**: File → New → Project… → **iOS App**
    - Product Name: `InfiniteCanvasApp` / Interface: SwiftUI / Language: Swift
-   - 「Use Core Data」「Host in CloudKit」のチェックは **不要**(自前実装済み)
-2. Xcode が生成した `InfiniteCanvasAppApp.swift` と `ContentView.swift` を削除
-3. このリポジトリの `InfiniteCanvasApp/` 配下のフォルダ一式をプロジェクトナビゲータへドラッグ
+   - Testing System: None / Storage: **None**(Core Data は選ばない。自前実装済み)
+   - 保存先にクローンした `ipad-note-app` フォルダを指定
+     (リポジトリ直下に `InfiniteCanvasApp/` プロジェクトフォルダが作られる)
+   - 「Create Git repository」のチェックが出た場合はオフ
+3. Xcode が生成した `InfiniteCanvasAppApp.swift` と `ContentView.swift` を削除(Move to Trash)
+4. Finder でリポジトリ直下の `Sources/` フォルダをプロジェクトナビゲータへドラッグ
    - 「Copy items if needed」は **オフ**(リポジトリ内のファイルをそのまま参照)
-   - 「Create groups」を選択し、ターゲットに追加
+   - 「Create groups」を選択し、ターゲット `InfiniteCanvasApp` に追加
    - `InfiniteCanvas.xcdatamodeld` がターゲットに含まれていることを確認
-4. **Signing & Capabilities** で以下を追加:
+5. **Signing & Capabilities** で以下を追加:
    - `iCloud` → CloudKit にチェック → コンテナ `iCloud.<バンドルID>` を作成
    - `Background Modes` → Remote notifications にチェック
-5. Deployment Target を **iOS 17.0** に設定
-6. iPad シミュレーターで実行(CloudKit 同期の確認は iCloud サインイン済みの実機推奨)
+6. Deployment Target を **iOS 17.0** に設定
+7. iPad シミュレーターで実行(CloudKit 同期の確認は iCloud サインイン済みの実機推奨)
+8. ビルドが通ったら Integrate → Commit… で `.xcodeproj` をコミット & プッシュ
+   (以後 Windows 側の変更は Xcode の Integrate → Pull だけで取り込める)
 
 ## 設計メモ (①)
 
