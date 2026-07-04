@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+DerivedData/
+build/
+
+# Swift Package Manager
+.swiftpm/
+.build/
+
+# 環境・秘匿情報
+.env
+auth.json
