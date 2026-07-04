@@ -3,6 +3,7 @@ import PencilKit
 import CoreData
 import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// 1つのノートの無限キャンバス。
 /// レイヤー構成(下から): 背景パターン → オブジェクト → 手書き(PKCanvasView)。

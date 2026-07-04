@@ -1,5 +1,6 @@
 import SwiftUI
 import PencilKit
+import UIKit
 
 /// Goodnotes 風のアプリ固定カスタムツールバー(PKToolPicker 不使用)。
 /// 左: ツール切替 / 中央: 太さ3スロット / 右: カラーパレット + カスタム色 + 折りたたみ。

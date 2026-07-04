@@ -1,6 +1,7 @@
 import SwiftUI
 import PencilKit
 import Combine
+import UIKit
 
 enum CanvasTool: String, CaseIterable {
     case selector, pen, marker, eraser

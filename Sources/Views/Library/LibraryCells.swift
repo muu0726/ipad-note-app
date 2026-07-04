@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import UIKit
 
 /// グリッドのフォルダタイル
 struct FolderCell: View {
