@@ -23,6 +23,7 @@ enum LibraryService {
         titled title: String,
         folder: Folder?,
         pageColor: CanvasPageColor = .white,
+        noteType: CanvasNoteType = .infinite,
         in context: NSManagedObjectContext
     ) -> NoteFile {
         let note = NoteFile(context: context)
@@ -32,6 +33,8 @@ enum LibraryService {
         note.updatedAt = .now
         note.folder = folder
         note.pageColor = pageColor.rawValue
+        note.noteType = noteType.rawValue
+        note.pageCount = 1  // 通常ノートは1ページから開始
         save(context)
         return note
     }

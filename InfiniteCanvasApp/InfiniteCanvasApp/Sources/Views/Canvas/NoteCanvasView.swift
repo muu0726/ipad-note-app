@@ -53,8 +53,11 @@ struct NoteCanvasView: View {
                 drawing: $drawing,
                 pkTool: toolState.pkTool,
                 isSelectMode: toolState.isSelectMode,
+                isShapeAssistEnabled: toolState.isShapeAssistEnabled,
                 backgroundStyle: CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank,
                 pageColor: note.canvasPageColor,
+                noteType: note.canvasNoteType,
+                pageCount: note.resolvedPageCount,
                 objects: Array(objects),
                 autoFocusObjectID: autoFocusObjectID,
                 initialViewport: session.viewports[note.objectID],
@@ -64,13 +67,42 @@ struct NoteCanvasView: View {
                 },
                 onViewportChanged: { session.viewports[note.objectID] = $0 },
                 onObjectFrameChanged: { id, frame in
-                    withObject(id) { $0.contentFrame = frame }
+                    withObject(id) { object in
+                        let previous = object.contentFrame
+                        object.contentFrame = frame
+                        if previous != frame, let uuid = object.id {
+                            CanvasObjectUndo.registerFrameChange(
+                                objectUUID: uuid, previousFrame: previous,
+                                in: undoBridge.activeUndoManager,
+                                context: context, bridge: undoBridge
+                            )
+                        }
+                    }
                 },
                 onObjectTextChanged: { id, text in
-                    withObject(id) { $0.text = text }
+                    withObject(id) { object in
+                        let previous = object.text ?? ""
+                        object.text = text
+                        if previous != text, let uuid = object.id {
+                            CanvasObjectUndo.registerTextChange(
+                                objectUUID: uuid, previousText: previous,
+                                in: undoBridge.activeUndoManager,
+                                context: context, bridge: undoBridge
+                            )
+                        }
+                    }
                 },
                 onObjectDeleted: { id in
-                    withObject(id) { context.delete($0) }
+                    withObject(id) { object in
+                        if let snapshot = CanvasObjectSnapshot(object: object) {
+                            CanvasObjectUndo.registerDelete(
+                                snapshot: snapshot,
+                                in: undoBridge.activeUndoManager,
+                                context: context, bridge: undoBridge
+                            )
+                        }
+                        context.delete(object)
+                    }
                 },
                 onCanvasReady: { undoBridge.attach($0) }
             )
@@ -78,6 +110,12 @@ struct NoteCanvasView: View {
                 guard let request else { return }
                 insert(request, viewSize: geo.size)
                 insertion = nil
+            }
+            // ページ追加ボタン(通常ノートのみ・右下フローティング)
+            .overlay(alignment: .bottomTrailing) {
+                if note.canvasNoteType == .paged {
+                    addPageButton
+                }
             }
         }
         .onAppear {
@@ -91,6 +129,35 @@ struct NoteCanvasView: View {
             // タブ切替・ライブラリ復帰時は即時保存
             saveTask?.cancel()
             persist()
+        }
+    }
+
+    // MARK: - ページ追加(通常ノート)
+
+    private var addPageButton: some View {
+        Button(action: addPage) {
+            Label("ページを追加", systemImage: "plus")
+                .labelStyle(.titleAndIcon)
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(.thinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color(.separator), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        }
+        .buttonStyle(.plain)
+        .padding(24)
+        .accessibilityIdentifier("canvas-add-page")
+    }
+
+    /// ページ数を1増やして保存する。CanvasRepresentable が高さを拡張し、新ページへスクロールする。
+    private func addPage() {
+        note.pageCount += 1
+        note.updatedAt = .now
+        do {
+            try context.save()
+        } catch {
+            assertionFailure("ページ追加の保存に失敗: \(error)")
         }
     }
 
@@ -140,6 +207,13 @@ struct NoteCanvasView: View {
         toolState.tool = .selector  // 配置直後にそのまま移動・編集できるよう選択モードへ
         autoFocusObjectID = object.objectID
         persist()
+        if let uuid = object.id {
+            CanvasObjectUndo.registerInsert(
+                objectUUID: uuid,
+                in: undoBridge.activeUndoManager,
+                context: context, bridge: undoBridge
+            )
+        }
     }
 
     /// 現在のビューポート中央(コンテンツ空間)。未スクロールならキャンバス中央

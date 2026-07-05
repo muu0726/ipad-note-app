@@ -21,8 +21,10 @@ final class ObjectLayerUIView: UIView {
     var onTextChanged: ((NSManagedObjectID, String) -> Void)?
     var onDelete: ((NSManagedObjectID) -> Void)?
 
+    /// 現在のズーム倍率。オブジェクトはコンテンツ空間に直接配置され、スクロール/ズーム追従は
+    /// スクロールビュー(PKCanvasView)の合成に任せるため、この値はスナップ閾値・タッチ判定の
+    /// 「スクリーン上の見かけの距離」を保つためだけに使う(ズーム時のみ更新)。
     private(set) var zoom: CGFloat = 1
-    private(set) var offset: CGPoint = .zero
     private(set) var selectedID: NSManagedObjectID?
     private var objectViews: [NSManagedObjectID: CanvasObjectUIView] = [:]
     private let guideLayer = CAShapeLayer()
@@ -56,22 +58,10 @@ final class ObjectLayerUIView: UIView {
 
     // MARK: - ビューポート追従
 
-    func update(offset: CGPoint, zoom: CGFloat) {
-        self.offset = offset
+    /// ズーム変更時のみ呼ばれ、スナップ閾値やタッチ判定の倍率を更新する。
+    /// スクロール・ズームによるオブジェクトの再配置はスクロールビューの合成が行うため不要。
+    func applyZoom(_ zoom: CGFloat) {
         self.zoom = zoom
-        for view in objectViews.values where !view.isInteracting {
-            view.applyPlacement()
-        }
-    }
-
-    /// コンテンツ空間 → スクリーン空間
-    func screenRect(for content: CGRect) -> CGRect {
-        CGRect(
-            x: content.origin.x * zoom - offset.x,
-            y: content.origin.y * zoom - offset.y,
-            width: content.width * zoom,
-            height: content.height * zoom
-        )
     }
 
     // MARK: - モデル同期
@@ -137,19 +127,20 @@ final class ObjectLayerUIView: UIView {
             guideLayer.path = nil
             return
         }
+        // ガイドもコンテンツ空間。ビューはコンテンツ全体サイズなので端から端まで引く
+        // (可視範囲外はスクロールビューがクリップする)。線幅はズームで見かけが変わらないよう補正
         let path = UIBezierPath()
         for guide in guides {
             switch guide.axis {
             case .vertical:
-                let x = guide.position * zoom - offset.x
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: bounds.height))
+                path.move(to: CGPoint(x: guide.position, y: 0))
+                path.addLine(to: CGPoint(x: guide.position, y: bounds.height))
             case .horizontal:
-                let y = guide.position * zoom - offset.y
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: bounds.width, y: y))
+                path.move(to: CGPoint(x: 0, y: guide.position))
+                path.addLine(to: CGPoint(x: bounds.width, y: guide.position))
             }
         }
+        guideLayer.lineWidth = 1 / max(zoom, 0.01)
         guideLayer.path = path.cgPath
     }
 }
@@ -230,9 +221,11 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
     }
 
-    /// 角に半分はみ出した削除ボタン/ハンドルも押せるよう当たり判定を広げる
+    /// 角に半分はみ出した削除ボタン/ハンドルも押せるよう当たり判定を広げる。
+    /// コンテンツ空間なので、スクリーン上で概ね一定(約16pt)になるようズームで補正する。
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -16, dy: -16).contains(point)
+        let margin = 16 / max(layerView?.zoom ?? 1, 0.01)
+        return bounds.insetBy(dx: -margin, dy: -margin).contains(point)
     }
 
     // MARK: - モデル反映
@@ -248,12 +241,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         applyPlacement()
     }
 
-    /// contentFrame とビューポートからスクリーン上のフレームを再計算
+    /// コンテンツ空間へ直接配置する。スクロール/ズームへの追従はスクロールビューの合成が行う
+    /// ため、オフセットやズームの計算は不要(= スクロール中の再配置コストがゼロ)。
     func applyPlacement() {
-        guard let layerView else { return }
-        frame = layerView.screenRect(for: contentFrame)
+        frame = contentFrame
         if kind == .text {
-            textView.font = .systemFont(ofSize: fontSize * layerView.zoom)
+            textView.font = .systemFont(ofSize: fontSize)
         }
         setNeedsLayout()
     }
@@ -286,12 +279,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     func textViewDidChange(_ textView: UITextView) {
-        // 入力に合わせて高さを自動拡張
-        guard let layerView else { return }
+        // 入力に合わせて高さを自動拡張。テキストはコンテンツ空間のフォントサイズなので
+        // sizeThatFits の結果はそのままコンテンツ空間の高さになる(ズーム換算は不要)
         let fitting = textView.sizeThatFits(
             CGSize(width: bounds.width, height: .greatestFiniteMagnitude)
         )
-        let newHeight = max(40, fitting.height / layerView.zoom)
+        let newHeight = max(40, fitting.height)
         if abs(newHeight - contentFrame.height) > 0.5 {
             contentFrame.size.height = newHeight
             applyPlacement()
@@ -325,10 +318,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             isInteracting = true
             gestureStartFrame = contentFrame
         case .changed:
+            // layerView はコンテンツ空間(ズームで拡縮される)なので、そこで測った
+            // translation はコンテンツ空間の移動量そのもの(ズーム除算は不要)
             let t = gesture.translation(in: layerView)
-            let proposed = gestureStartFrame.offsetBy(
-                dx: t.x / layerView.zoom, dy: t.y / layerView.zoom
-            )
+            let proposed = gestureStartFrame.offsetBy(dx: t.x, dy: t.y)
             let result = layerView.snapResult(moving: proposed, excluding: objectID)
             contentFrame = result.frame
             layerView.showGuides(result.guides)
@@ -350,8 +343,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             gestureStartFrame = contentFrame
         case .changed:
             let t = gesture.translation(in: layerView)
-            var newWidth = gestureStartFrame.width + t.x / layerView.zoom
-            var newHeight = gestureStartFrame.height + t.y / layerView.zoom
+            var newWidth = gestureStartFrame.width + t.x
+            var newHeight = gestureStartFrame.height + t.y
             if kind == .text {
                 newWidth = max(60, newWidth)
                 newHeight = max(40, newHeight)

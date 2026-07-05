@@ -113,11 +113,20 @@ private struct NoteCreateSheet: View {
     @EnvironmentObject private var session: OpenNotesSession
     @State private var name = ""
     @State private var pageColor: CanvasPageColor = .white
+    @State private var noteType: CanvasNoteType = .infinite
 
     var body: some View {
         NavigationStack {
             Form {
                 TextField("名前", text: $name)
+                Section("ノートの種類") {
+                    Picker("ノートの種類", selection: $noteType) {
+                        ForEach(CanvasNoteType.allCases, id: \.self) { type in
+                            Text(type.label).tag(type)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
                 Section("用紙の色") {
                     HStack(spacing: 20) {
                         ForEach(CanvasPageColor.allCases, id: \.self) { color in
@@ -141,6 +150,7 @@ private struct NoteCreateSheet: View {
                             titled: name,
                             folder: parent,
                             pageColor: pageColor,
+                            noteType: noteType,
                             in: context
                         )
                         session.open(note)
