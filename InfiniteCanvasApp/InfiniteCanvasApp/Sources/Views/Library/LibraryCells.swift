@@ -116,5 +116,6 @@ struct AddNoteTile: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("add-note-tile")
     }
 }

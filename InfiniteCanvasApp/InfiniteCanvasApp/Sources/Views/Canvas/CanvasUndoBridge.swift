@@ -10,6 +10,9 @@ final class CanvasUndoBridge: ObservableObject {
     @Published private(set) var canRedo = false
     private weak var canvasView: PKCanvasView?
 
+    /// オブジェクト操作(CanvasObjectUndo)の登録先。描画と同じ履歴に混在させる
+    var activeUndoManager: UndoManager? { canvasView?.undoManager }
+
     func attach(_ canvas: PKCanvasView) {
         canvasView = canvas
         refresh()

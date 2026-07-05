@@ -75,6 +75,10 @@ final class PenToolState: ObservableObject {
     /// カラーパレット(「＋」の ColorPicker で任意色も選択可能)。黒い用紙用に白も用意
     @Published var palette: [UIColor] = [.black, .white, .systemRed, .systemBlue, .systemGreen, .systemOrange]
 
+    /// 図形認識アシスト。ON のとき、描き終えたストロークが直線・楕円・矩形に近ければ
+    /// きれいな図形へ自動置換する。誤判定を嫌うユーザー向けに既定は OFF。
+    @Published var isShapeAssistEnabled = false
+
     var currentWidth: CGFloat {
         get { widths[tool] ?? 3 }
         set { widths[tool] = min(max(newValue, widthRange.lowerBound), widthRange.upperBound) }

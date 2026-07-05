@@ -21,6 +21,8 @@ struct PenToolbarView: View {
                 barDivider
                 toolButtons
                 barDivider
+                shapeAssistButton
+                barDivider
                 widthControl
                 barDivider
                 colorPalette
@@ -62,6 +64,7 @@ struct PenToolbarView: View {
             .buttonStyle(.plain)
             .disabled(!undoBridge.canUndo)
             .opacity(undoBridge.canUndo ? 1 : 0.35)
+            .accessibilityIdentifier("toolbar-undo")
 
             Button {
                 undoBridge.redo()
@@ -74,6 +77,7 @@ struct PenToolbarView: View {
             .buttonStyle(.plain)
             .disabled(!undoBridge.canRedo)
             .opacity(undoBridge.canRedo ? 1 : 0.35)
+            .accessibilityIdentifier("toolbar-redo")
         }
     }
 
@@ -103,6 +107,29 @@ struct PenToolbarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("toolbar-tool-\(tool.rawValue)")
+    }
+
+    // MARK: - 図形認識アシスト(要件: ON/OFF トグル)
+
+    /// ON のとき、描き終えた手書きが直線・楕円・矩形に近ければきれいな図形へ自動置換する
+    private var shapeAssistButton: some View {
+        Button {
+            toolState.isShapeAssistEnabled.toggle()
+        } label: {
+            Image(systemName: "square.on.circle")
+                .font(.system(size: 18))
+                .frame(width: 40, height: 34)
+                .background(
+                    toolState.isShapeAssistEnabled ? Color.accentColor.opacity(0.18) : .clear,
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("toolbar-shape-assist")
+        .accessibilityLabel("図形アシスト")
+        .accessibilityAddTraits(toolState.isShapeAssistEnabled ? [.isSelected] : [])
     }
 
     // MARK: - 太さ(数値管理。Goodnotes 風にタップでスライダーポップオーバー)
@@ -227,5 +254,6 @@ struct PenToolbarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("toolbar-insert-menu")
     }
 }

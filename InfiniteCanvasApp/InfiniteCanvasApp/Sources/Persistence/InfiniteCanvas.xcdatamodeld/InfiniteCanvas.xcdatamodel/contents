@@ -33,7 +33,9 @@
         <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="isTrashed" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="noteType" optional="YES" attributeType="String" defaultValueString="infinite"/>
         <attribute name="pageColor" optional="YES" attributeType="String" defaultValueString="white"/>
+        <attribute name="pageCount" optional="YES" attributeType="Integer 16" defaultValueString="1" usesScalarValueType="YES"/>
         <attribute name="thumbnailData" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="title" optional="YES" attributeType="String"/>
         <attribute name="trashedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
