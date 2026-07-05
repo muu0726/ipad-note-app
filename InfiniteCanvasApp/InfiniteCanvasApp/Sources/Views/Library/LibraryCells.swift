@@ -41,6 +41,7 @@ struct FolderCell: View {
         .dropDestination(for: LibraryItemTransfer.self) { items, _ in
             handleLibraryDrop(items, into: folder, context: context)
         } isTargeted: { isDropTargeted = $0 }
+        .accessibilityIdentifier("grid-folder-\(folder.displayName)")
     }
 }
 
@@ -87,6 +88,7 @@ struct NoteCell: View {
             ItemContextMenu(item: .note(note), actions: actions)
         }
         .draggable(LibraryItemTransfer(item: .note(note)))
+        .accessibilityIdentifier("grid-note-\(note.displayTitle)")
     }
 }
 

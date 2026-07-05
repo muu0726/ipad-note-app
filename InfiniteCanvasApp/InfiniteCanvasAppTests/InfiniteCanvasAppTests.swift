@@ -1,6 +1,7 @@
 import Testing
 import CoreData
 import PencilKit
+import CoreTransferable
 @testable import InfiniteCanvasApp
 
 // MARK: - PenToolState
@@ -91,6 +92,24 @@ struct LibraryDragDropTests {
 
     private func makeContext() -> NSManagedObjectContext {
         PersistenceController(inMemory: true).container.viewContext
+    }
+
+    @Test("ドラッグ&ドロップの転送経路(NSItemProvider)で往復できる")
+    func transferRoundTripThroughItemProvider() async throws {
+        let context = makeContext()
+        let note = LibraryService.createNote(titled: "N", folder: nil, in: context)
+        let transfer = LibraryItemTransfer(item: .note(note))
+
+        // 実際のドラッグ&ドロップと同じ NSItemProvider 経由でエンコード→デコード
+        let provider = NSItemProvider()
+        provider.register(transfer)
+        let loaded: LibraryItemTransfer? = try await withCheckedThrowingContinuation { continuation in
+            _ = provider.loadTransferable(type: LibraryItemTransfer.self) { result in
+                continuation.resume(with: result.map { $0 })
+            }
+        }
+        #expect(loaded?.uri == transfer.uri)
+        #expect(loaded?.kind == transfer.kind)
     }
 
     @Test("ノートをフォルダへドロップすると移動する")

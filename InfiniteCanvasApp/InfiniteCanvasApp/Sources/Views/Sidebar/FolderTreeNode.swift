@@ -41,6 +41,7 @@ struct FolderTreeNode: View {
                 if moved { isExpanded = true }  // ドロップ先を開いて結果を見せる
                 return moved
             } isTargeted: { isDropTargeted = $0 }
+            .accessibilityIdentifier("sidebar-folder-\(folder.displayName)")
             .listRowBackground(
                 isDropTargeted ? Color.accentColor.opacity(0.18) : nil
             )

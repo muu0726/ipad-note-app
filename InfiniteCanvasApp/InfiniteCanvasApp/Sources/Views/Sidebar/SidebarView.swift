@@ -32,6 +32,7 @@ struct SidebarView: View {
                     .dropDestination(for: LibraryItemTransfer.self) { items, _ in
                         handleLibraryDrop(items, into: nil, context: context)
                     } isTargeted: { isRootDropTargeted = $0 }
+                    .accessibilityIdentifier("sidebar-all-notes")
                     .listRowBackground(
                         isRootDropTargeted ? Color.accentColor.opacity(0.18) : nil
                     )
