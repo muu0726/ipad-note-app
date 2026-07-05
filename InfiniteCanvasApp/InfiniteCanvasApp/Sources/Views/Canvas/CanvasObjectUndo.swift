@@ -1,5 +1,6 @@
 import CoreData
 import UIKit
+import PencilKit
 
 /// 削除・追加の Undo/Redo でオブジェクトを再構築するための全属性スナップショット
 struct CanvasObjectSnapshot {
@@ -89,6 +90,31 @@ enum CanvasObjectUndo {
         bridge?.refresh()
     }
 
+    /// テキストのフォントサイズ変更(高さの自動調整はビュー側が追従して保存する)
+    static func registerFontSizeChange(
+        objectUUID: UUID,
+        previousFontSize: Double,
+        in manager: UndoManager?,
+        context: NSManagedObjectContext,
+        bridge: CanvasUndoBridge?
+    ) {
+        guard let manager else { return }
+        manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
+            MainActor.assumeIsolated {
+                guard let object = fetchObject(objectUUID, in: context) else { return }
+                let current = object.fontSize
+                object.fontSize = previousFontSize
+                object.updatedAt = .now
+                saveAndRefresh(context: context, bridge: bridge)
+                registerFontSizeChange(
+                    objectUUID: objectUUID, previousFontSize: current,
+                    in: manager, context: context, bridge: bridge
+                )
+            }
+        }
+        bridge?.refresh()
+    }
+
     /// オブジェクト追加(Undo = 削除)
     static func registerInsert(
         objectUUID: UUID,
@@ -124,6 +150,41 @@ enum CanvasObjectUndo {
                 restore(snapshot, context: context, bridge: bridge)
                 registerInsert(
                     objectUUID: snapshot.id, in: manager, context: context, bridge: bridge
+                )
+            }
+        }
+        bridge?.refresh()
+    }
+
+    /// ページ削除に伴う「ページ数」と「手書き描画」の一括変更を Undo に積む。
+    /// 同一ラン内で登録される各オブジェクトの削除 Undo と自動的に1グループへまとまる。
+    /// - toRestore: Undo で戻す状態 / - toReapply: Redo で再適用する状態
+    static func registerPageStructureChange(
+        noteID: NSManagedObjectID,
+        drawingToRestore: PKDrawing,
+        pageCountToRestore: Int16,
+        drawingToReapply: PKDrawing,
+        pageCountToReapply: Int16,
+        in manager: UndoManager?,
+        context: NSManagedObjectContext,
+        bridge: CanvasUndoBridge?
+    ) {
+        guard let manager else { return }
+        manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
+            MainActor.assumeIsolated {
+                if let note = (try? context.existingObject(with: noteID)) as? NoteFile {
+                    note.pageCount = pageCountToRestore
+                    note.updatedAt = .now
+                }
+                bridge?.replaceDrawing(drawingToRestore)
+                if context.hasChanges { try? context.save() }
+                bridge?.refresh()
+                // Undo 中の登録は Redo として積まれる(状態を入れ替えて再登録)
+                registerPageStructureChange(
+                    noteID: noteID,
+                    drawingToRestore: drawingToReapply, pageCountToRestore: pageCountToReapply,
+                    drawingToReapply: drawingToRestore, pageCountToReapply: pageCountToRestore,
+                    in: manager, context: context, bridge: bridge
                 )
             }
         }

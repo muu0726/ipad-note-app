@@ -246,6 +246,31 @@ struct OpenNotesSessionTests {
         #expect(session.openNotes == [b])
     }
 
+    @Test("ビューポート(スクロール位置・ズーム)が UserDefaults 経由で復元される")
+    func viewportRoundTrip() throws {
+        let controller = PersistenceController(inMemory: true)
+        let context = controller.container.viewContext
+        let note = makeNote("VP", in: context)
+        try context.save()  // permanent objectID を確定
+
+        // 保存側: ビューポートを更新して即時フラッシュ
+        let saver = OpenNotesSession()
+        saver.restore(in: context)
+        saver.updateViewport(
+            CanvasViewport(contentOffset: CGPoint(x: 123, y: 456), zoomScale: 2.5),
+            for: note.objectID
+        )
+        saver.flushViewports()
+
+        // 復元側(新規プロセス相当)
+        let restored = OpenNotesSession()
+        restored.restore(in: context)
+        let got = restored.viewports[note.objectID]
+        #expect(got?.contentOffset.x == 123)
+        #expect(got?.contentOffset.y == 456)
+        #expect(got?.zoomScale == 2.5)
+    }
+
     @Test("永続化された URI からタブと選択状態を復元できる")
     func restoreFromDefaults() throws {
         let controller = PersistenceController(inMemory: true)

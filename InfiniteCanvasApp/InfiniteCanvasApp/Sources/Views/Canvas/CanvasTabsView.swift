@@ -27,7 +27,8 @@ struct CanvasTabsView: View {
                 isCollapsed: $isToolbarCollapsed,
                 onInsertText: { pendingInsertion = .text },
                 onInsertImage: { isPhotoPickerPresented = true },
-                onInsertPDF: { isPDFImporterPresented = true }
+                onInsertPDF: { isPDFImporterPresented = true },
+                onFontSizeChange: changeSelectedTextFontSize
             )
             Divider()
             NoteTabBar()
@@ -119,6 +120,29 @@ struct CanvasTabsView: View {
         note.backgroundStyle = style.rawValue
         note.updatedAt = .now
         try? context.save()
+    }
+
+    /// 選択中テキストのフォントサイズを変更し、Core Data 保存 + Undo 登録する。
+    /// 高さの自動調整はオブジェクトビューが検知して追従・保存する。
+    private func changeSelectedTextFontSize(to newSize: CGFloat) {
+        guard var selection = toolState.selectedTextObject,
+              let object = (try? context.existingObject(with: selection.objectID)) as? CanvasObject,
+              let uuid = object.id else { return }
+        let clamped = min(max(newSize, PenToolState.fontSizeRange.lowerBound),
+                          PenToolState.fontSizeRange.upperBound)
+        guard abs(clamped - object.fontSize) > 0.01 else { return }
+
+        CanvasObjectUndo.registerFontSizeChange(
+            objectUUID: uuid, previousFontSize: object.fontSize,
+            in: undoBridge.activeUndoManager, context: context, bridge: undoBridge
+        )
+        object.fontSize = clamped
+        object.updatedAt = .now
+        try? context.save()
+
+        // ツールバー表示を即時更新
+        selection.fontSize = clamped
+        toolState.selectedTextObject = selection
     }
 }
 

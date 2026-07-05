@@ -54,6 +54,10 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onObjectFrameChanged: (NSManagedObjectID, CGRect) -> Void
     let onObjectTextChanged: (NSManagedObjectID, String) -> Void
     let onObjectDeleted: (NSManagedObjectID) -> Void
+    /// フォントサイズ変更に伴う高さ自動調整の保存(Undo なし)
+    let onObjectAutoHeightChanged: (NSManagedObjectID, CGFloat) -> Void
+    /// テキスト選択の変化(ツールバーのフォントサイズ UI 用)。テキスト以外/未選択は nil
+    let onTextSelectionChanged: ((objectID: NSManagedObjectID, fontSize: CGFloat)?) -> Void
     /// Undo/Redo ブリッジなどにキャンバスを渡す
     let onCanvasReady: (PKCanvasView) -> Void
 
@@ -108,12 +112,24 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.objectLayer.onDelete = { [weak coordinator] id in
             coordinator?.parent.onObjectDeleted(id)
         }
+        container.objectLayer.onAutoHeightChanged = { [weak coordinator] id, height in
+            coordinator?.parent.onObjectAutoHeightChanged(id, height)
+        }
+        container.objectLayer.onTextSelectionChanged = { [weak coordinator] info in
+            coordinator?.parent.onTextSelectionChanged(info)
+        }
 
         // 初期ビューポート(保存がなければ形式ごとの初期位置)
         DispatchQueue.main.async {
             if let viewport = initialViewport {
                 canvas.zoomScale = viewport.zoomScale
-                canvas.contentOffset = viewport.contentOffset
+                if noteType == .paged {
+                    // 画面幅の変化(回転/Split View)に耐えるため、横位置は中央寄せに任せ、
+                    // 復元するのはズームと縦スクロール位置のみ(x は読み込まない)
+                    canvas.contentOffset = CGPoint(x: 0, y: viewport.contentOffset.y)
+                } else {
+                    canvas.contentOffset = viewport.contentOffset
+                }
             } else if noteType == .paged {
                 fitPagedWidth(canvas)  // A4幅を画面幅にフィット + 先頭ページ上端
             } else {

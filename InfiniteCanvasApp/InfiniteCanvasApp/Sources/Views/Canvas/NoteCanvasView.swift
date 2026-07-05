@@ -24,6 +24,7 @@ struct NoteCanvasView: View {
     @State private var drawing: PKDrawing
     @State private var saveTask: Task<Void, Never>?
     @State private var autoFocusObjectID: NSManagedObjectID?
+    @State private var showDeletePageConfirm = false
 
     init(
         note: NoteFile,
@@ -65,7 +66,7 @@ struct NoteCanvasView: View {
                     scheduleAutoSave()
                     undoBridge.refresh()  // 描画のたびに戻る/やり直しボタンの状態を更新
                 },
-                onViewportChanged: { session.viewports[note.objectID] = $0 },
+                onViewportChanged: { session.updateViewport($0, for: note.objectID) },
                 onObjectFrameChanged: { id, frame in
                     withObject(id) { object in
                         let previous = object.contentFrame
@@ -104,6 +105,19 @@ struct NoteCanvasView: View {
                         context.delete(object)
                     }
                 },
+                onObjectAutoHeightChanged: { id, height in
+                    // フォント変更に伴う高さ調整は Undo を積まずに保存(フォント変更 Undo に追従)
+                    withObject(id) { $0.contentFrame.size.height = height }
+                },
+                onTextSelectionChanged: { info in
+                    if let info {
+                        toolState.selectedTextObject = SelectedTextObject(
+                            objectID: info.objectID, fontSize: info.fontSize
+                        )
+                    } else {
+                        toolState.selectedTextObject = nil
+                    }
+                },
                 onCanvasReady: { undoBridge.attach($0) }
             )
             .onChange(of: insertion) { _, request in
@@ -111,11 +125,21 @@ struct NoteCanvasView: View {
                 insert(request, viewSize: geo.size)
                 insertion = nil
             }
-            // ページ追加ボタン(通常ノートのみ・右下フローティング)
+            // ページ追加/削除ボタン(通常ノートのみ・右下フローティング)
             .overlay(alignment: .bottomTrailing) {
                 if note.canvasNoteType == .paged {
-                    addPageButton
+                    HStack(spacing: 12) {
+                        if note.resolvedPageCount > 1 { deletePageButton }
+                        addPageButton
+                    }
+                    .padding(24)
                 }
+            }
+            .alert("最後のページを削除しますか？", isPresented: $showDeletePageConfirm) {
+                Button("削除", role: .destructive) { deleteLastPage() }
+                Button("キャンセル", role: .cancel) {}
+            } message: {
+                Text("このページ上の手書きとオブジェクトも削除されますがよろしいですか？")
             }
         }
         .onAppear {
@@ -129,6 +153,8 @@ struct NoteCanvasView: View {
             // タブ切替・ライブラリ復帰時は即時保存
             saveTask?.cancel()
             persist()
+            session.flushViewports()  // 保留中のスクロール位置も確定
+            toolState.selectedTextObject = nil  // 別タブへ選択を持ち越さない
         }
     }
 
@@ -136,18 +162,30 @@ struct NoteCanvasView: View {
 
     private var addPageButton: some View {
         Button(action: addPage) {
-            Label("ページを追加", systemImage: "plus")
-                .labelStyle(.titleAndIcon)
-                .font(.subheadline.weight(.semibold))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(.thinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color(.separator), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+            pageButtonLabel("ページを追加", systemImage: "plus")
         }
         .buttonStyle(.plain)
-        .padding(24)
         .accessibilityIdentifier("canvas-add-page")
+    }
+
+    private var deletePageButton: some View {
+        Button { showDeletePageConfirm = true } label: {
+            pageButtonLabel("ページを削除", systemImage: "trash")
+                .foregroundStyle(.red)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("canvas-delete-page")
+    }
+
+    private func pageButtonLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .labelStyle(.titleAndIcon)
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.thinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color(.separator), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
     }
 
     /// ページ数を1増やして保存する。CanvasRepresentable が高さを拡張し、新ページへスクロールする。
@@ -159,6 +197,45 @@ struct NoteCanvasView: View {
         } catch {
             assertionFailure("ページ追加の保存に失敗: \(error)")
         }
+    }
+
+    /// 最後のページを削除し、そのページ領域(Y範囲)に重なる手書きインクとオブジェクトも消す。
+    /// ページ数・描画・オブジェクト削除は1つの Undo グループにまとまる。
+    private func deleteLastPage() {
+        guard note.canvasNoteType == .paged, note.resolvedPageCount > 1 else { return }
+        let oldCount = Int(note.pageCount)
+        // 削除対象ページの開始 Y = (pageCount - 1) * (ページ高 + ギャップ)。以降がすべて対象。
+        let yStart = CGFloat(oldCount - 1) * (PageMetrics.height + PageMetrics.gap)
+        let manager = undoBridge.activeUndoManager
+
+        // 1) オブジェクト: contentFrame の中心が削除領域にあるものを削除(Undo 登録付き)
+        for object in objects where !object.isDeleted && object.contentFrame.midY >= yStart {
+            if let snapshot = CanvasObjectSnapshot(object: object) {
+                CanvasObjectUndo.registerDelete(
+                    snapshot: snapshot, in: manager, context: context, bridge: undoBridge
+                )
+            }
+            context.delete(object)
+        }
+
+        // 2) 手書き: ストロークの描画範囲の中心が削除領域にあるものを除去
+        let drawingBefore = drawing
+        var drawingAfter = drawing
+        drawingAfter.strokes.removeAll { $0.renderBounds.midY >= yStart }
+
+        // 3) ページ数と描画の一括変更を Undo に積む(上のオブジェクト削除と同一グループ)
+        CanvasObjectUndo.registerPageStructureChange(
+            noteID: note.objectID,
+            drawingToRestore: drawingBefore, pageCountToRestore: Int16(oldCount),
+            drawingToReapply: drawingAfter, pageCountToReapply: Int16(oldCount - 1),
+            in: manager, context: context, bridge: undoBridge
+        )
+
+        // 適用
+        drawing = drawingAfter
+        note.pageCount = Int16(oldCount - 1)
+        note.updatedAt = .now
+        persist()
     }
 
     // MARK: - オブジェクト操作の書き戻し

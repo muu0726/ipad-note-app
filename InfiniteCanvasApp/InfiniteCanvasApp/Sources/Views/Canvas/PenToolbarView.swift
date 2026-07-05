@@ -11,6 +11,8 @@ struct PenToolbarView: View {
     var onInsertText: () -> Void = {}
     var onInsertImage: () -> Void = {}
     var onInsertPDF: () -> Void = {}
+    /// 選択中テキストのフォントサイズ変更(新しい絶対サイズを渡す)
+    var onFontSizeChange: (CGFloat) -> Void = { _ in }
     @State private var customColor: Color = .black
     @State private var isWidthPopoverPresented = false
 
@@ -22,6 +24,11 @@ struct PenToolbarView: View {
                 toolButtons
                 barDivider
                 shapeAssistButton
+                // テキスト選択中はフォントサイズ変更UIを差し込む
+                if toolState.isSelectMode, toolState.selectedTextObject != nil {
+                    barDivider
+                    fontSizeControl
+                }
                 barDivider
                 widthControl
                 barDivider
@@ -108,6 +115,45 @@ struct PenToolbarView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("toolbar-tool-\(tool.rawValue)")
+    }
+
+    // MARK: - フォントサイズ(テキスト選択中のみ表示)
+
+    private var currentFontSize: CGFloat {
+        toolState.selectedTextObject?.fontSize ?? 24
+    }
+
+    private var fontSizeControl: some View {
+        HStack(spacing: 8) {
+            Button { adjustFontSize(by: -2) } label: {
+                Image(systemName: "textformat.size.smaller")
+                    .font(.system(size: 18))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("toolbar-font-decrease")
+
+            Text("\(Int(currentFontSize.rounded()))")
+                .font(.callout.monospacedDigit())
+                .frame(minWidth: 28)
+                .accessibilityIdentifier("toolbar-font-size")
+
+            Button { adjustFontSize(by: 2) } label: {
+                Image(systemName: "textformat.size.larger")
+                    .font(.system(size: 18))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("toolbar-font-increase")
+        }
+    }
+
+    private func adjustFontSize(by delta: CGFloat) {
+        let range = PenToolState.fontSizeRange
+        let next = min(max(currentFontSize + delta, range.lowerBound), range.upperBound)
+        onFontSizeChange(next)
     }
 
     // MARK: - 図形認識アシスト(要件: ON/OFF トグル)

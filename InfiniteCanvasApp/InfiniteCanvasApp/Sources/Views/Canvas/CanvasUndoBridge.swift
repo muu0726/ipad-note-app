@@ -13,6 +13,15 @@ final class CanvasUndoBridge: ObservableObject {
     /// オブジェクト操作(CanvasObjectUndo)の登録先。描画と同じ履歴に混在させる
     var activeUndoManager: UndoManager? { canvasView?.undoManager }
 
+    /// 現在のキャンバスの描画(ページ削除・Undo でストロークを差し替えるのに使う)
+    var currentDrawing: PKDrawing? { canvasView?.drawing }
+
+    /// 描画を差し替える。canvasViewDrawingDidChange 経由で @State と保存へ伝播する。
+    func replaceDrawing(_ drawing: PKDrawing) {
+        canvasView?.drawing = drawing
+        refresh()
+    }
+
     func attach(_ canvas: PKCanvasView) {
         canvasView = canvas
         refresh()
