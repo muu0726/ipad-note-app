@@ -4,7 +4,7 @@ Goodnotes / フリーボード風の無限キャンバス・ノートアプリ�
 
 - **スタック**: SwiftUI / PencilKit / Core Data / iPadOS 17+
   (CloudKit 同期は有料 Developer アカウント取得後に有効化。現在はローカル保存のみ)
-- **ワークフロー**: Windows で開発 → GitHub → MacBook (Xcode) でビルド・実機確認
+- **ワークフロー**: Mac で開発・ビルド・実機確認(旧: Windows → GitHub → Mac)
 
 ## 進捗
 
@@ -12,13 +12,19 @@ Goodnotes / フリーボード風の無限キャンバス・ノートアプリ�
 - [x] ② 無限キャンバス(PencilKit + ズーム / スクロール / 自動保存 / サムネイル生成)
 - [x] ③ カスタムペンツールバー(ペン / マーカー / 消しゴム・太さ3スロット・カラーパレット)
 - [x] ④ 背景テンプレート(白紙 / 方眼 / ドット)
-- [ ] ③ オブジェクト配置(テキスト / 画像 / PDF)← 次: UI/UX設計案の承認から
-- [ ] ④ オブジェクトのスナップ(吸着)← オブジェクト配置とセットで実装
+- [x] ③ オブジェクト配置(テキスト / 画像 / PDF・選択 / 移動 / リサイズ / 削除)
+- [x] ④ オブジェクトのスナップ(他オブジェクトの端・中心 + グリッドへ吸着、ガイド線表示)
+- [x] ⑤ 自由ノート風ツールバー改善(戻る / やり直し・なぞって消える消しゴム・
+      オブジェクトの長押し削除・ノート作成時の用紙色選択 白 / 黒)
 
 ## ディレクトリ構成
 
+Xcode プロジェクトは `InfiniteCanvasApp/InfiniteCanvasApp.xcodeproj`。
+ソースは新形式の「フォルダ同期グループ」で組み込まれているため、
+**フォルダに追加した Swift ファイルは自動でターゲットに含まれる**(手動追加は不要)。
+
 ```
-Sources/
+InfiniteCanvasApp/InfiniteCanvasApp/Sources/
 ├── App/
 │   └── InfiniteCanvasNoteApp.swift      # エントリポイント
 ├── Persistence/
@@ -27,6 +33,7 @@ Sources/
 ├── Models/
 │   ├── Folder+Helpers.swift             # 階層取得・循環参照チェック
 │   ├── NoteFile+Helpers.swift
+│   ├── CanvasObject+Helpers.swift       # オブジェクト種別 / フレーム / PDF レンダリング
 │   └── LibraryItem.swift                # フォルダ/ノート共通ラッパー
 ├── Services/
 │   ├── LibraryService.swift             # 作成/名前変更/移動/ゴミ箱/削除
@@ -42,43 +49,44 @@ Sources/
     └── Common/                          # ダイアログ / 移動先ピッカー
 ```
 
-## Mac (Xcode) での組み込み手順
+## ビルド・実行
 
-1. **クローン**: Xcode 起動 → Welcome 画面の「Clone Git Repository…」
-   (またはメニュー Integrate → Clone…)→ `https://github.com/muu0726/ipad-note-app.git` を入力
-   → 保存先(例: `~/Developer`)を選択。クローン後にフォルダが開いたらいったん閉じる
-2. **プロジェクト作成**: File → New → Project… → **iOS App**
-   - Product Name: `InfiniteCanvasApp` / Interface: SwiftUI / Language: Swift
-   - Testing System: None / Storage: **None**(Core Data は選ばない。自前実装済み)
-   - 保存先にクローンした `ipad-note-app` フォルダを指定
-     (リポジトリ直下に `InfiniteCanvasApp/` プロジェクトフォルダが作られる)
-   - 「Create Git repository」のチェックが出た場合はオフ
-3. Xcode が生成した `InfiniteCanvasAppApp.swift` と `ContentView.swift` を削除(Move to Trash)
-4. Finder でリポジトリ直下の `Sources/` フォルダをプロジェクトナビゲータへドラッグ
-   - 「Copy items if needed」は **オフ**(リポジトリ内のファイルをそのまま参照)
-   - 「Create groups」を選択し、ターゲット `InfiniteCanvasApp` に追加
-   - `InfiniteCanvas.xcdatamodeld` がターゲットに含まれていることを確認
-5. ~~Signing & Capabilities で iCloud / Background Modes を追加~~
-   → **無料アカウント(Personal Team)では不要・不可。** 有料アカウント取得後に
-   iCloud (CloudKit) + Background Modes (Remote notifications) を追加し、
-   `PersistenceController` の `NSPersistentContainer` を `NSPersistentCloudKitContainer` に戻す
-6. Deployment Target を **iOS 17.0** に設定
-7. iPad シミュレーターで実行
-8. ビルドが通ったら Integrate → Commit… で `.xcodeproj` をコミット & プッシュ
-   (以後 Windows 側の変更は Xcode の Integrate → Pull だけで取り込める)
+- Xcode で `InfiniteCanvasApp/InfiniteCanvasApp.xcodeproj` を開き、iPad シミュレーターを選んで ⌘R
+- CLI: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project InfiniteCanvasApp/InfiniteCanvasApp.xcodeproj -scheme InfiniteCanvasApp -destination 'generic/platform=iOS Simulator' build`
+- 新しい Xcode は「定義モジュールの明示 import」を厳格に要求する
+  (例: `@Published` を使うファイルは `import Combine` が必須)
+- データモデルの変更は軽量マイグレーションで自動移行されるため、シミュレーターのデータ削除は不要
+- **iCloud (CloudKit)**: 無料アカウント(Personal Team)では不可。有料 Developer アカウント取得後に
+  Signing & Capabilities で iCloud (CloudKit) + Background Modes (Remote notifications) を追加し、
+  `PersistenceController` の `NSPersistentContainer` を `NSPersistentCloudKitContainer` に戻す
 
-## Pull 後に Xcode 側で必要な作業(重要)
+## 設計メモ (③ オブジェクト配置 / ④ スナップ)
 
-Xcode に「グループ」として追加したフォルダは、**Windows 側で後から増えたファイルを自動では取り込まない**。
-Pull 後、以下の新規ファイルを Finder から `Views/Canvas` グループへドラッグしてターゲットに追加すること:
+- **レイヤー構成**: `背景パターン → ObjectLayerUIView → PKCanvasView(透明)` の3層。
+  オブジェクトレイヤーも背景と同じスクリーン空間ビューで contentOffset / zoomScale に追従(KVO)。
+  インクは常にオブジェクトの上に描かれる(画像・PDF の上に手書き注釈できる)
+- **選択モード**: ツールバー先頭の手のひらツール。PKCanvasView の drawingGestureRecognizer を
+  無効化し、`CanvasContainerUIView.hitTest` がオブジェクトへのタッチを下層レイヤーへ転送する。
+  描画モード中はオブジェクトに一切タッチが渡らない(誤操作防止)
+- **オブジェクト**: Core Data の `CanvasObject`(kind = text / image / pdf、フレームはコンテンツ空間、
+  payload に画像 / PDF バイナリ)。PDF は1ページ目を PDFKit で画像化して表示(原本は保持)
+- **挿入**: ツールバーの「＋」メニュー → 現在のビューポート中央に配置し、自動で選択モードへ。
+  テキストはそのまま編集開始。画像はフォトライブラリ、PDF はファイルアプリから
+- **スナップ(④)**: ドラッグ中に `SnapEngine` が他オブジェクトの端・中心(オレンジのガイド線表示)と
+  背景グリッド 40pt(ガイドなし)へ吸着。しきい値はスクリーン上で常に約 8pt(ズーム補正)
+- **テキスト**: 選択済みを再タップでインライン編集(UITextView)。入力に応じて高さ自動拡張。
+  リサイズハンドル(右下)で自由リサイズ、画像 / PDF はアスペクト比固定
+- **サムネイル**: 描画とオブジェクトを合成してライブラリ用サムネイルを生成(用紙色を反映)
 
-- `Sources/Views/Canvas/PenToolState.swift`
-- `Sources/Views/Canvas/PenToolbarView.swift`
-- `Sources/Views/Canvas/CanvasRepresentable.swift`
-- `Sources/Views/Canvas/NoteCanvasView.swift`
+## 設計メモ (⑤ 自由ノート風の操作系)
 
-データモデル(`NoteFile` に `canvasData` / `backgroundStyle` を追加)は軽量マイグレーションで
-自動移行されるため、シミュレーターのデータ削除は不要。
+- **戻る / やり直し**: `CanvasUndoBridge` が PKCanvasView.undoManager を叩く。
+  PencilKit が描画操作を自動登録するため、描画変更のたびに canUndo / canRedo を引き直すだけ
+- **消しゴム**: `PKEraserTool(.bitmap)`(なぞった部分だけ消える)。旧 .vector はストローク丸ごと消し
+- **オブジェクト削除**: 選択モードで長押し → 編集メニュー(UIEditMenuInteraction)の「削除」
+- **用紙色**: `NoteFile.pageColor`(white / black、軽量マイグレーション)。作成シートで選択。
+  白紙 = 黒い罫線・ドット / 黒紙 = 白い罫線・ドット。テキストオブジェクトとサムネイルも連動。
+  用紙と同色のペンで開いた場合は自動で反転色に切り替え(黒紙で黒ペン → 白ペン)
 
 ## 設計メモ (②③④)
 

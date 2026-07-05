@@ -19,13 +19,19 @@ enum LibraryService {
     }
 
     @discardableResult
-    static func createNote(titled title: String, folder: Folder?, in context: NSManagedObjectContext) -> NoteFile {
+    static func createNote(
+        titled title: String,
+        folder: Folder?,
+        pageColor: CanvasPageColor = .white,
+        in context: NSManagedObjectContext
+    ) -> NoteFile {
         let note = NoteFile(context: context)
         note.id = UUID()
         note.title = title.isEmpty ? "無題ノート" : title
         note.createdAt = .now
         note.updatedAt = .now
         note.folder = folder
+        note.pageColor = pageColor.rawValue
         save(context)
         return note
     }

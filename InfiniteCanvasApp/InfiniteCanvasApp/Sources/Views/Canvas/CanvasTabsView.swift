@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreData
 import PencilKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 /// ノートを開いたときのディテール領域。
 /// 承認済みレイアウト: ナビバー → ペンツールバー(上) → タブバー(下) → キャンバス。
@@ -8,17 +10,56 @@ struct CanvasTabsView: View {
     @EnvironmentObject private var session: OpenNotesSession
     @Environment(\.managedObjectContext) private var context
     @StateObject private var toolState = PenToolState()
+    @StateObject private var undoBridge = CanvasUndoBridge()
     @State private var isToolbarCollapsed = false
+
+    // オブジェクト挿入(要件③): ピッカーで読み込んだデータをキャンバスへ渡す
+    @State private var pendingInsertion: ObjectInsertion?
+    @State private var isPhotoPickerPresented = false
+    @State private var photoSelection: PhotosPickerItem?
+    @State private var isPDFImporterPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
-            PenToolbarView(toolState: toolState, isCollapsed: $isToolbarCollapsed)
+            PenToolbarView(
+                toolState: toolState,
+                undoBridge: undoBridge,
+                isCollapsed: $isToolbarCollapsed,
+                onInsertText: { pendingInsertion = .text },
+                onInsertImage: { isPhotoPickerPresented = true },
+                onInsertPDF: { isPDFImporterPresented = true }
+            )
             Divider()
             NoteTabBar()
             canvasArea
         }
         .navigationTitle(session.selectedNote?.displayTitle ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .photosPicker(
+            isPresented: $isPhotoPickerPresented,
+            selection: $photoSelection,
+            matching: .images
+        )
+        .onChange(of: photoSelection) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    pendingInsertion = .image(data)
+                }
+                photoSelection = nil
+            }
+        }
+        .fileImporter(
+            isPresented: $isPDFImporterPresented,
+            allowedContentTypes: [.pdf]
+        ) { result in
+            guard case .success(let url) = result else { return }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            if let data = try? Data(contentsOf: url) {
+                pendingInsertion = .pdf(data)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -37,7 +78,12 @@ struct CanvasTabsView: View {
     @ViewBuilder
     private var canvasArea: some View {
         if let note = session.selectedNote {
-            NoteCanvasView(note: note, toolState: toolState)
+            NoteCanvasView(
+                note: note,
+                toolState: toolState,
+                undoBridge: undoBridge,
+                insertion: $pendingInsertion
+            )
                 // タブ切替時はビューを作り直す(ビューポートは session から復元される)
                 .id(note.objectID)
         }

@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import Combine
 
 /// 作成・名前変更・移動・削除ダイアログの状態を一元管理するコーディネータ。
 /// サイドバーとグリッドの両方から共有される。

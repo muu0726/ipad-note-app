@@ -1,6 +1,7 @@
 import SwiftUI
 import PencilKit
 import UIKit
+import CoreData
 
 /// タブごとのビューポート(スクロール位置・ズーム)。OpenNotesSession が保持する。
 struct CanvasViewport {
@@ -17,10 +18,20 @@ struct CanvasRepresentable: UIViewRepresentable {
 
     @Binding var drawing: PKDrawing
     let pkTool: PKTool
+    let isSelectMode: Bool
     let backgroundStyle: CanvasBackgroundStyle
+    let pageColor: CanvasPageColor
+    let objects: [CanvasObject]
+    /// 挿入直後に選択(テキストなら編集開始)するオブジェクト
+    let autoFocusObjectID: NSManagedObjectID?
     let initialViewport: CanvasViewport?
     let onDrawingChanged: () -> Void
     let onViewportChanged: (CanvasViewport) -> Void
+    let onObjectFrameChanged: (NSManagedObjectID, CGRect) -> Void
+    let onObjectTextChanged: (NSManagedObjectID, String) -> Void
+    let onObjectDeleted: (NSManagedObjectID) -> Void
+    /// Undo/Redo ブリッジなどにキャンバスを渡す
+    let onCanvasReady: (PKCanvasView) -> Void
 
     func makeUIView(context: Context) -> CanvasContainerUIView {
         let container = CanvasContainerUIView()
@@ -29,7 +40,22 @@ struct CanvasRepresentable: UIViewRepresentable {
         canvas.tool = pkTool
         canvas.delegate = context.coordinator
         container.patternView.style = backgroundStyle
+        container.patternView.pageColor = pageColor
+        container.objectLayer.pageColor = pageColor
         context.coordinator.attach(to: container)
+        onCanvasReady(canvas)
+
+        // オブジェクト操作の書き戻し(常に最新の parent を経由させる)
+        let coordinator = context.coordinator
+        container.objectLayer.onFrameChanged = { [weak coordinator] id, frame in
+            coordinator?.parent.onObjectFrameChanged(id, frame)
+        }
+        container.objectLayer.onTextChanged = { [weak coordinator] id, text in
+            coordinator?.parent.onObjectTextChanged(id, text)
+        }
+        container.objectLayer.onDelete = { [weak coordinator] id in
+            coordinator?.parent.onObjectDeleted(id)
+        }
 
         // 初期ビューポート(保存がなければキャンバス中央)
         DispatchQueue.main.async {
@@ -52,6 +78,12 @@ struct CanvasRepresentable: UIViewRepresentable {
         let canvas = container.canvasView
         canvas.tool = pkTool
         container.patternView.style = backgroundStyle
+        container.patternView.pageColor = pageColor
+        container.isSelectMode = isSelectMode
+        container.objectLayer.backgroundStyle = backgroundStyle
+        container.objectLayer.pageColor = pageColor
+        context.coordinator.syncObjects(into: container.objectLayer)
+        context.coordinator.handleAutoFocus(in: container.objectLayer)
         // モデル側から描画が差し替わった場合のみ反映(描画中の上書きを防ぐ)
         if !context.coordinator.isCanvasSourceOfTruth, canvas.drawing != drawing {
             canvas.drawing = drawing
@@ -64,17 +96,21 @@ struct CanvasRepresentable: UIViewRepresentable {
         var parent: CanvasRepresentable
         var isCanvasSourceOfTruth = false
         private var observations: [NSKeyValueObservation] = []
+        /// image / pdf のレンダリング結果キャッシュ(payload のデコードは1回だけ)
+        private var imageCache: [NSManagedObjectID: UIImage] = [:]
+        private var autoFocusHandledID: NSManagedObjectID?
 
         init(_ parent: CanvasRepresentable) {
             self.parent = parent
         }
 
-        /// contentOffset / zoomScale を監視して背景パターンとビューポート保存を更新
+        /// contentOffset / zoomScale を監視して背景・オブジェクトレイヤーとビューポート保存を更新
         func attach(to container: CanvasContainerUIView) {
             let canvas = container.canvasView
             let update: (PKCanvasView) -> Void = { [weak self, weak container] canvas in
                 guard let self, let container else { return }
                 container.patternView.update(offset: canvas.contentOffset, zoom: canvas.zoomScale)
+                container.objectLayer.update(offset: canvas.contentOffset, zoom: canvas.zoomScale)
                 self.parent.onViewportChanged(
                     CanvasViewport(contentOffset: canvas.contentOffset, zoomScale: canvas.zoomScale)
                 )
@@ -91,19 +127,74 @@ struct CanvasRepresentable: UIViewRepresentable {
             parent.onDrawingChanged()
             isCanvasSourceOfTruth = false
         }
+
+        // MARK: - オブジェクト同期(要件③)
+
+        @MainActor
+        func syncObjects(into layer: ObjectLayerUIView) {
+            let items = parent.objects
+                .filter { !$0.isDeleted && $0.managedObjectContext != nil }
+                .sorted { $0.zOrder < $1.zOrder }
+                .map { object -> CanvasObjectItem in
+                    var image: UIImage?
+                    if object.objectKind != .text {
+                        if let cached = imageCache[object.objectID] {
+                            image = cached
+                        } else if let rendered = object.makeDisplayImage() {
+                            imageCache[object.objectID] = rendered
+                            image = rendered
+                        }
+                    }
+                    return CanvasObjectItem(
+                        id: object.objectID,
+                        kind: object.objectKind,
+                        frame: object.contentFrame,
+                        text: object.text ?? "",
+                        fontSize: object.fontSize > 0 ? object.fontSize : 24,
+                        image: image
+                    )
+                }
+            layer.sync(items: items)
+        }
+
+        /// 挿入直後のオブジェクトを選択し、テキストなら編集を開始する(1回だけ)
+        @MainActor
+        func handleAutoFocus(in layer: ObjectLayerUIView) {
+            guard let id = parent.autoFocusObjectID, id != autoFocusHandledID else { return }
+            autoFocusHandledID = id
+            layer.focus(on: id)
+        }
     }
 }
 
-/// 背景パターン(下) + PKCanvasView(上・透明背景) を重ねたコンテナ
-final class CanvasContainerUIView: UIView {
+/// 背景パターン(下) + オブジェクトレイヤー(中) + PKCanvasView(上・透明背景) を重ねたコンテナ。
+/// インクは常にオブジェクトの上に描かれる(画像や PDF の上に手書き注釈できる)。
+final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     let canvasView = PKCanvasView()
     let patternView = BackgroundPatternUIView()
+    let objectLayer = ObjectLayerUIView()
+
+    /// 選択モード(要件③)。描画ジェスチャを無効化し、タッチをオブジェクトレイヤーへ転送する
+    var isSelectMode = false {
+        didSet {
+            guard isSelectMode != oldValue else { return }
+            objectLayer.isSelectMode = isSelectMode
+            canvasView.drawingGestureRecognizer.isEnabled = !isSelectMode
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
 
         patternView.contentMode = .redraw
         addSubview(patternView)
+        addSubview(objectLayer)
+
+        // オブジェクトのない場所のタップで選択解除(スクロール等の邪魔はしない)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        addGestureRecognizer(tap)
 
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
@@ -124,8 +215,30 @@ final class CanvasContainerUIView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         patternView.frame = bounds
+        objectLayer.frame = bounds
         canvasView.frame = bounds
     }
+
+    /// オブジェクトレイヤーは PKCanvasView の下にあり通常はタッチが届かないため、
+    /// 選択モード中はここでオブジェクトへのヒットを優先して転送する
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if isSelectMode {
+            let converted = convert(point, to: objectLayer)
+            if let hit = objectLayer.hitTest(converted, with: event), hit !== objectLayer {
+                return hit
+            }
+        }
+        return super.hitTest(point, with: event)
+    }
+
+    @objc private func handleBackgroundTap(_ gesture: UITapGestureRecognizer) {
+        objectLayer.handleBackgroundTap(at: gesture.location(in: objectLayer))
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+    ) -> Bool { true }
 }
 
 /// スクリーン空間で方眼 / ドットを描く背景ビュー。
@@ -133,6 +246,10 @@ final class CanvasContainerUIView: UIView {
 final class BackgroundPatternUIView: UIView {
     var style: CanvasBackgroundStyle = .blank {
         didSet { if style != oldValue { setNeedsDisplay() } }
+    }
+    /// 用紙の色。白紙は黒い罫線・ドット、黒紙は白(要件: ノート作成時に選択)
+    var pageColor: CanvasPageColor = .white {
+        didSet { if pageColor != oldValue { setNeedsDisplay() } }
     }
     private var offset: CGPoint = .zero
     private var zoom: CGFloat = 1
@@ -145,7 +262,7 @@ final class BackgroundPatternUIView: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        UIColor.systemBackground.setFill()
+        pageColor.backgroundUIColor.setFill()
         ctx.fill(bounds)
         guard style != .blank else { return }
 
@@ -157,7 +274,7 @@ final class BackgroundPatternUIView: UIView {
 
         switch style {
         case .grid:
-            ctx.setStrokeColor(UIColor.separator.withAlphaComponent(0.6).cgColor)
+            ctx.setStrokeColor(pageColor.patternUIColor.cgColor)
             ctx.setLineWidth(0.5)
             var x = phaseX
             while x < bounds.width {
@@ -173,7 +290,7 @@ final class BackgroundPatternUIView: UIView {
             }
             ctx.strokePath()
         case .dots:
-            ctx.setFillColor(UIColor.separator.cgColor)
+            ctx.setFillColor(pageColor.patternUIColor.cgColor)
             var x = phaseX
             while x < bounds.width {
                 var y = phaseY
