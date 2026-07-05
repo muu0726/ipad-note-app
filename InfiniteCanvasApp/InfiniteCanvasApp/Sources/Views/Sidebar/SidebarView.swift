@@ -4,6 +4,8 @@ import CoreData
 struct SidebarView: View {
     @Binding var selection: SidebarSelection?
     @ObservedObject var actions: LibraryActionCoordinator
+    @Environment(\.managedObjectContext) private var context
+    @State private var isRootDropTargeted = false
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(key: "name", ascending: true,
@@ -24,12 +26,19 @@ struct SidebarView: View {
     var body: some View {
         List(selection: $selection) {
             Section {
+                // ここへドロップするとルート直下へ移動
                 Label("すべてのノート", systemImage: "square.grid.2x2")
                     .tag(SidebarSelection.allNotes)
+                    .dropDestination(for: LibraryItemTransfer.self) { items, _ in
+                        handleLibraryDrop(items, into: nil, context: context)
+                    } isTargeted: { isRootDropTargeted = $0 }
+                    .listRowBackground(
+                        isRootDropTargeted ? Color.accentColor.opacity(0.18) : nil
+                    )
             }
             Section("ライブラリ") {
                 ForEach(rootFolders) { folder in
-                    FolderTreeNode(folder: folder, actions: actions)
+                    FolderTreeNode(folder: folder, selection: $selection, actions: actions)
                 }
                 ForEach(rootNotes) { note in
                     NoteRow(note: note, actions: actions)

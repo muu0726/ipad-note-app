@@ -3,7 +3,7 @@ import PencilKit
 import Combine
 
 enum CanvasTool: String, CaseIterable {
-    case selector, pen, marker, eraser
+    case selector, lasso, pen, marker, eraser
 }
 
 /// ノート作成時に選ぶ用紙の色(白 / 黒)。
@@ -61,14 +61,12 @@ enum CanvasBackgroundStyle: String, CaseIterable {
 final class PenToolState: ObservableObject {
     @Published var tool: CanvasTool = .pen
 
-    /// ツールごとの太さ3スロット(pt)
-    @Published var widthSlots: [CanvasTool: [CGFloat]] = [
-        .pen: [1.5, 3, 6],
-        .marker: [8, 14, 20],
-        .eraser: [12, 28, 56],
+    /// ツールごとの太さ(pt)。数値で管理し、スライダーで調整する(Goodnotes 風)
+    @Published var widths: [CanvasTool: CGFloat] = [
+        .pen: 3,
+        .marker: 14,
+        .eraser: 28,
     ]
-    /// ツールごとの選択中スロット(太さはツールごとに独立して記憶)
-    @Published var selectedSlot: [CanvasTool: Int] = [.pen: 1, .marker: 1, .eraser: 1]
 
     /// ペン・マーカーの色(ツールごとに独立して記憶)
     @Published var penColor: UIColor = .black
@@ -78,14 +76,23 @@ final class PenToolState: ObservableObject {
     @Published var palette: [UIColor] = [.black, .white, .systemRed, .systemBlue, .systemGreen, .systemOrange]
 
     var currentWidth: CGFloat {
-        let slots = widthSlots[tool] ?? [3, 6, 9]
-        let index = min(selectedSlot[tool] ?? 1, slots.count - 1)
-        return slots[index]
+        get { widths[tool] ?? 3 }
+        set { widths[tool] = min(max(newValue, widthRange.lowerBound), widthRange.upperBound) }
+    }
+
+    /// ツールごとの太さの可動域(pt)
+    var widthRange: ClosedRange<CGFloat> {
+        switch tool {
+        case .pen: 0.5...20
+        case .marker: 2...40
+        case .eraser: 4...80
+        case .selector, .lasso: 1...1  // 未使用(太さ UI を無効化)
+        }
     }
 
     var currentColor: UIColor {
         switch tool {
-        case .pen, .eraser, .selector: penColor
+        case .pen, .eraser, .selector, .lasso: penColor
         case .marker: markerColor
         }
     }
@@ -93,11 +100,16 @@ final class PenToolState: ObservableObject {
     /// オブジェクトの選択・移動モードかどうか(要件③)
     var isSelectMode: Bool { tool == .selector }
 
+    /// 太さ・色の調整 UI が意味を持たないツールかどうか
+    var isWidthAdjustable: Bool {
+        tool == .pen || tool == .marker || tool == .eraser
+    }
+
     func setColor(_ color: UIColor) {
         switch tool {
         case .pen: penColor = color
         case .marker: markerColor = color
-        case .eraser, .selector: break
+        case .eraser, .selector, .lasso: break
         }
     }
 
@@ -111,6 +123,9 @@ final class PenToolState: ObservableObject {
         case .eraser:
             // .bitmap = なぞった部分だけ消える(ストローク丸ごと消える .vector ではなく)
             return PKEraserTool(.bitmap, width: currentWidth)
+        case .lasso:
+            // 手書きストロークを囲って選択 → ドラッグ移動、タップでカット/コピー/削除メニュー
+            return PKLassoTool()
         case .selector:
             // 選択モード中は描画ジェスチャ自体を無効化するため実際には使われない
             return PKInkingTool(.pen, color: penColor, width: currentWidth)

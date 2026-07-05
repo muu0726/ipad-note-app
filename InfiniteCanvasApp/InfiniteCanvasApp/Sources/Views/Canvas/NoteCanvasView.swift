@@ -228,7 +228,10 @@ struct NoteCanvasView: View {
                     object.makeDisplayImage()?.draw(in: object.contentFrame)
                 }
             }
-            drawing.image(from: target, scale: scale).draw(in: target)
+            // キャンバスと同様、ダークモードでのインク色自動反転を避けて描き出す
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                drawing.image(from: target, scale: scale).draw(in: target)
+            }
         }
         return image.jpegData(compressionQuality: 0.7)
     }

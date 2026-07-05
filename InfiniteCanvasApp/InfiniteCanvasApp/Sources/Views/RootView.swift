@@ -10,6 +10,7 @@ enum SidebarSelection: Hashable {
 
 struct RootView: View {
     @EnvironmentObject private var session: OpenNotesSession
+    @Environment(\.managedObjectContext) private var context
     @StateObject private var actions = LibraryActionCoordinator()
     @State private var selection: SidebarSelection? = .allNotes
 
@@ -20,6 +21,10 @@ struct RootView: View {
             detailContent
         }
         .libraryActionDialogs(actions)
+        .onAppear {
+            // 前回開いていたタブ・選択中ノートを復元(初回のみ有効)
+            session.restore(in: context)
+        }
     }
 
     @ViewBuilder

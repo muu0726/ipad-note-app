@@ -186,6 +186,10 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
 
+        // PencilKit はダークモード時にインク色を自動反転する(黒⇄白)が、
+        // 用紙色(白/黒)はアプリ側で管理しているため反転を止め、選んだ色のまま描く
+        overrideUserInterfaceStyle = .light
+
         patternView.contentMode = .redraw
         addSubview(patternView)
         addSubview(objectLayer)

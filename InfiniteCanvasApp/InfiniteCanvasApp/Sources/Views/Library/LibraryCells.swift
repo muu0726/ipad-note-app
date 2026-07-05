@@ -1,23 +1,30 @@
 import SwiftUI
 import CoreData
 
-/// グリッドのフォルダタイル
+/// グリッドのフォルダタイル(ドラッグ移動可・他の項目のドロップ先になる)
 struct FolderCell: View {
     @ObservedObject var folder: Folder
     @ObservedObject var actions: LibraryActionCoordinator
     let onOpen: () -> Void
+    @Environment(\.managedObjectContext) private var context
+    @State private var isDropTargeted = false
 
     var body: some View {
         Button(action: onOpen) {
             VStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(.secondarySystemBackground))
-                        .aspectRatio(4 / 3, contentMode: .fit)
+                        .fill(isDropTargeted ? Color.accentColor.opacity(0.25)
+                                             : Color(.secondarySystemBackground))
                     Image(systemName: "folder.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(.tint)
                 }
+                .aspectRatio(4 / 3, contentMode: .fit)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(isDropTargeted ? Color.accentColor : .clear, lineWidth: 2)
+                )
                 Text(folder.displayName)
                     .font(.callout)
                     .lineLimit(1)
@@ -30,6 +37,10 @@ struct FolderCell: View {
         .contextMenu {
             ItemContextMenu(item: .folder(folder), actions: actions)
         }
+        .draggable(LibraryItemTransfer(item: .folder(folder)))
+        .dropDestination(for: LibraryItemTransfer.self) { items, _ in
+            handleLibraryDrop(items, into: folder, context: context)
+        } isTargeted: { isDropTargeted = $0 }
     }
 }
 
@@ -42,25 +53,27 @@ struct NoteCell: View {
     var body: some View {
         Button(action: onOpen) {
             VStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(.systemBackground))
-                        .aspectRatio(4 / 3, contentMode: .fit)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .strokeBorder(Color(.separator), lineWidth: 0.5)
-                        )
-                    if let data = note.thumbnailData, let image = UIImage(data: data) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                    } else {
-                        Image(systemName: "scribble.variable")
-                            .font(.system(size: 36))
-                            .foregroundStyle(.quaternary)
+                // サムネイルは必ずタイル枠内に収めてクリップする
+                // (scaledToFill のはみ出しで隣のノートとくっついて見えるのを防ぐ)
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.systemBackground))
+                    .aspectRatio(4 / 3, contentMode: .fit)
+                    .overlay {
+                        if let data = note.thumbnailData, let image = UIImage(data: data) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: "scribble.variable")
+                                .font(.system(size: 36))
+                                .foregroundStyle(.quaternary)
+                        }
                     }
-                }
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Color(.separator), lineWidth: 0.5)
+                    )
                 Text(note.displayTitle)
                     .font(.callout)
                     .lineLimit(1)
@@ -73,6 +86,7 @@ struct NoteCell: View {
         .contextMenu {
             ItemContextMenu(item: .note(note), actions: actions)
         }
+        .draggable(LibraryItemTransfer(item: .note(note)))
     }
 }
 

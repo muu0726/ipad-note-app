@@ -6,11 +6,27 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		CAFE00072FF95A790000EAAB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DE7ADE052FF95A790000EAAB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DE7ADE0C2FF95A790000EAAB;
+			remoteInfo = InfiniteCanvasApp;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		CAFE00012FF95A790000EAAB /* InfiniteCanvasAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = InfiniteCanvasAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DE7ADE0D2FF95A790000EAAB /* InfiniteCanvasApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = InfiniteCanvasApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		CAFE00022FF95A790000EAAB /* InfiniteCanvasAppTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = InfiniteCanvasAppTests;
+			sourceTree = "<group>";
+		};
 		DE7ADE0F2FF95A790000EAAB /* InfiniteCanvasApp */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = InfiniteCanvasApp;
@@ -19,6 +35,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		CAFE00052FF95A790000EAAB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DE7ADE0A2FF95A790000EAAB /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				DE7ADE0F2FF95A790000EAAB /* InfiniteCanvasApp */,
+				CAFE00022FF95A790000EAAB /* InfiniteCanvasAppTests */,
 				DE7ADE0E2FF95A790000EAAB /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				DE7ADE0D2FF95A790000EAAB /* InfiniteCanvasApp.app */,
+				CAFE00012FF95A790000EAAB /* InfiniteCanvasAppTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,6 +73,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		CAFE00032FF95A790000EAAB /* InfiniteCanvasAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CAFE00092FF95A790000EAAB /* Build configuration list for PBXNativeTarget "InfiniteCanvasAppTests" */;
+			buildPhases = (
+				CAFE00042FF95A790000EAAB /* Sources */,
+				CAFE00052FF95A790000EAAB /* Frameworks */,
+				CAFE00062FF95A790000EAAB /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CAFE00082FF95A790000EAAB /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CAFE00022FF95A790000EAAB /* InfiniteCanvasAppTests */,
+			);
+			name = InfiniteCanvasAppTests;
+			packageProductDependencies = (
+			);
+			productName = InfiniteCanvasAppTests;
+			productReference = CAFE00012FF95A790000EAAB /* InfiniteCanvasAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		DE7ADE0C2FF95A790000EAAB /* InfiniteCanvasApp */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = DE7ADE182FF95A7A0000EAAB /* Build configuration list for PBXNativeTarget "InfiniteCanvasApp" */;
@@ -80,6 +128,10 @@
 				LastSwiftUpdateCheck = 2660;
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
+					CAFE00032FF95A790000EAAB = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = DE7ADE0C2FF95A790000EAAB;
+					};
 					DE7ADE0C2FF95A790000EAAB = {
 						CreatedOnToolsVersion = 26.6;
 					};
@@ -100,11 +152,19 @@
 			projectRoot = "";
 			targets = (
 				DE7ADE0C2FF95A790000EAAB /* InfiniteCanvasApp */,
+				CAFE00032FF95A790000EAAB /* InfiniteCanvasAppTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		CAFE00062FF95A790000EAAB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DE7ADE0B2FF95A790000EAAB /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -115,6 +175,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		CAFE00042FF95A790000EAAB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		DE7ADE092FF95A790000EAAB /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -124,7 +191,59 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		CAFE00082FF95A790000EAAB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DE7ADE0C2FF95A790000EAAB /* InfiniteCanvasApp */;
+			targetProxy = CAFE00072FF95A790000EAAB /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		CAFE000A2FF95A790000EAAB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74A9BZ7WYR;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.muu0726.InfiniteCanvasAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/InfiniteCanvasApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/InfiniteCanvasApp";
+			};
+			name = Debug;
+		};
+		CAFE000B2FF95A790000EAAB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 74A9BZ7WYR;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.muu0726.InfiniteCanvasAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/InfiniteCanvasApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/InfiniteCanvasApp";
+			};
+			name = Release;
+		};
 		DE7ADE162FF95A7A0000EAAB /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -313,6 +432,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		CAFE00092FF95A790000EAAB /* Build configuration list for PBXNativeTarget "InfiniteCanvasAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CAFE000A2FF95A790000EAAB /* Debug */,
+				CAFE000B2FF95A790000EAAB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		DE7ADE082FF95A790000EAAB /* Build configuration list for PBXProject "InfiniteCanvasApp" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

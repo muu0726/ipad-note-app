@@ -17,6 +17,7 @@ struct NoteRow: View {
         .contextMenu {
             ItemContextMenu(item: .note(note), actions: actions)
         }
+        .draggable(LibraryItemTransfer(item: .note(note)))
     }
 }
 

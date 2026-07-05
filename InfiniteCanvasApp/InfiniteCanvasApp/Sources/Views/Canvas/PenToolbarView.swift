@@ -12,6 +12,7 @@ struct PenToolbarView: View {
     var onInsertImage: () -> Void = {}
     var onInsertPDF: () -> Void = {}
     @State private var customColor: Color = .black
+    @State private var isWidthPopoverPresented = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -20,7 +21,7 @@ struct PenToolbarView: View {
                 barDivider
                 toolButtons
                 barDivider
-                widthSlots
+                widthControl
                 barDivider
                 colorPalette
                 barDivider
@@ -81,6 +82,7 @@ struct PenToolbarView: View {
     private var toolButtons: some View {
         HStack(spacing: 4) {
             toolButton(.selector, icon: "hand.point.up.left")
+            toolButton(.lasso, icon: "lasso")
             toolButton(.pen, icon: "pencil.tip")
             toolButton(.marker, icon: "highlighter")
             toolButton(.eraser, icon: "eraser")
@@ -103,34 +105,64 @@ struct PenToolbarView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - 太さ3スロット
+    // MARK: - 太さ(数値管理。Goodnotes 風にタップでスライダーポップオーバー)
 
-    private var widthSlots: some View {
-        widthSlotButtons
-            .disabled(toolState.isSelectMode)
-            .opacity(toolState.isSelectMode ? 0.35 : 1)
+    private var widthControl: some View {
+        Button {
+            isWidthPopoverPresented = true
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color.primary)
+                    .frame(width: widthPreviewDiameter, height: widthPreviewDiameter)
+                    .frame(width: 22, height: 22)
+                Text(widthText)
+                    .font(.callout.monospacedDigit())
+                    .frame(minWidth: 48, alignment: .leading)
+            }
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isWidthPopoverPresented, arrowEdge: .top) {
+            widthPopover
+        }
+        .disabled(!toolState.isWidthAdjustable)
+        .opacity(toolState.isWidthAdjustable ? 1 : 0.35)
     }
 
-    private var widthSlotButtons: some View {
-        HStack(spacing: 6) {
-            ForEach(0..<3, id: \.self) { index in
-                let isSelected = (toolState.selectedSlot[toolState.tool] ?? 1) == index
-                Button {
-                    toolState.selectedSlot[toolState.tool] = index
-                } label: {
-                    Circle()
-                        .fill(isSelected ? Color.primary : Color.secondary.opacity(0.35))
-                        .frame(width: 7 + CGFloat(index) * 4, height: 7 + CGFloat(index) * 4)
-                        .frame(width: 28, height: 28)
-                        .background(
-                            isSelected ? Color.accentColor.opacity(0.18) : .clear,
-                            in: Circle()
-                        )
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+    private var widthPopover: some View {
+        VStack(spacing: 14) {
+            Text("太さ: \(widthText)")
+                .font(.headline.monospacedDigit())
+            Slider(
+                value: Binding(
+                    get: { toolState.currentWidth },
+                    set: { toolState.currentWidth = ($0 * 2).rounded() / 2 }  // 0.5pt 刻み
+                ),
+                in: toolState.widthRange
+            )
+            // 実際の太さのプレビュー
+            Capsule()
+                .fill(Color.primary)
+                .frame(width: 180, height: min(toolState.currentWidth, 44))
+                .animation(.easeOut(duration: 0.1), value: toolState.currentWidth)
         }
+        .padding(20)
+        .frame(width: 280)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private var widthText: String {
+        String(format: "%.1f pt", toolState.currentWidth)
+    }
+
+    /// ツールバー内に収まるよう 6〜18pt に正規化した見本サイズ
+    private var widthPreviewDiameter: CGFloat {
+        let range = toolState.widthRange
+        let span = max(range.upperBound - range.lowerBound, 0.1)
+        let t = (toolState.currentWidth - range.lowerBound) / span
+        return 6 + t * 12
     }
 
     // MARK: - カラーパレット
@@ -162,12 +194,17 @@ struct PenToolbarView: View {
                     toolState.setColor(UIColor(newValue))
                 }
         }
-        .disabled(toolState.tool == .eraser || toolState.isSelectMode)
-        .opacity(toolState.tool == .eraser || toolState.isSelectMode ? 0.35 : 1)
+        .disabled(!isColorSelectable)
+        .opacity(isColorSelectable ? 1 : 0.35)
     }
 
     private func isCurrent(_ color: UIColor) -> Bool {
         toolState.currentColor == color
+    }
+
+    /// 色が選べるのはペン・マーカーのみ
+    private var isColorSelectable: Bool {
+        toolState.tool == .pen || toolState.tool == .marker
     }
 
     // MARK: - オブジェクト挿入(要件③)

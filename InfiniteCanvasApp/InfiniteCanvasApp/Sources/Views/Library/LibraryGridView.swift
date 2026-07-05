@@ -32,11 +32,14 @@ struct LibraryGridView: View {
                 predicate: NSPredicate(format: "folder == %@ AND isTrashed == NO", folder),
                 animation: .default)
         } else {
-            // すべてのノート: フォルダは表示しない
-            _folders = FetchRequest(sortDescriptors: nameSort, predicate: NSPredicate(value: false))
+            // すべてのノート: ルート直下のフォルダ + ノートを階層表示(フォルダ構成のまま辿れる)
+            _folders = FetchRequest(
+                sortDescriptors: nameSort,
+                predicate: NSPredicate(format: "parent == nil AND isTrashed == NO"),
+                animation: .default)
             _notes = FetchRequest(
                 sortDescriptors: titleSort,
-                predicate: NSPredicate(format: "isTrashed == NO"),
+                predicate: NSPredicate(format: "folder == nil AND isTrashed == NO"),
                 animation: .default)
         }
     }
