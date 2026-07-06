@@ -8,6 +8,7 @@ enum ObjectInsertion: Equatable {
     case text
     case image(Data)
     case pdf(Data)
+    case noteLink(UUID)  // 他のノートへのリンクカード
 }
 
 /// 1つのノートの無限キャンバス。
@@ -123,6 +124,9 @@ struct NoteCanvasView: View {
                 },
                 onLassoObjectsDeleted: { region in
                     deleteObjectsWithLasso(in: region)
+                },
+                onNoteLinkActivated: { id in
+                    openLinkedNote(objectID: id)
                 },
                 onCanvasReady: { undoBridge.attach($0) }
             )
@@ -244,6 +248,17 @@ struct NoteCanvasView: View {
         persist()
     }
 
+    // MARK: - ノートリンクのジャンプ
+
+    /// ノートリンクのダブルタップ → リンク先ノートをタブで開く(既存タブなら切替)。
+    private func openLinkedNote(objectID: NSManagedObjectID) {
+        guard let object = (try? context.existingObject(with: objectID)) as? CanvasObject,
+              let linked = object.resolvedLinkedNote else { return }
+        // 開く前に現在ノートの保留分を保存(タブ切替で消えないように)
+        persist()
+        session.open(linked)
+    }
+
     // MARK: - 投げ縄でのインクとオブジェクトの連動
 
     /// 投げ縄で移動したインク領域に中心があるオブジェクトを、同じ差分だけ平行移動する。
@@ -318,6 +333,10 @@ struct NoteCanvasView: View {
             let pageSize = PDFDocument(data: data)?.page(at: 0)?
                 .bounds(for: .mediaBox).size ?? CGSize(width: 300, height: 400)
             object.contentFrame = centered(fitted(pageSize, maxSide: 500), at: center)
+        case .noteLink(let linkedID):
+            object.kind = CanvasObjectKind.noteLink.rawValue
+            object.linkedNoteUUID = linkedID.uuidString
+            object.contentFrame = CGRect(x: center.x - 130, y: center.y - 40, width: 260, height: 80)
         }
 
         // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる
@@ -418,6 +437,18 @@ struct NoteCanvasView: View {
                     )
                 case .image, .pdf:
                     object.makeDisplayImage()?.draw(in: object.contentFrame)
+                case .noteLink:
+                    // サムネイルではリンクカードを角丸の淡い矩形として簡易描画
+                    let path = UIBezierPath(roundedRect: object.contentFrame, cornerRadius: 10)
+                    UIColor.secondarySystemBackground.setFill()
+                    path.fill()
+                    ((object.resolvedLinkedNote?.displayTitle ?? "ノート") as NSString).draw(
+                        in: object.contentFrame.insetBy(dx: 10, dy: 10),
+                        withAttributes: [
+                            .font: UIFont.systemFont(ofSize: 16, weight: .medium),
+                            .foregroundColor: pageColor.contentUIColor,
+                        ]
+                    )
                 }
             }
             // キャンバスと同様、ダークモードでのインク色自動反転を避けて描き出す

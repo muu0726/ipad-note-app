@@ -62,6 +62,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onLassoObjectsMoved: (CGRect, CGVector) -> Void
     /// 投げ縄でインクを削除したとき(削除された領域)。領域に重なるオブジェクトも削除する
     let onLassoObjectsDeleted: (CGRect) -> Void
+    /// ノートリンクのダブルタップでリンク先ノートを開く要求
+    let onNoteLinkActivated: (NSManagedObjectID) -> Void
     /// Undo/Redo ブリッジなどにキャンバスを渡す
     let onCanvasReady: (PKCanvasView) -> Void
 
@@ -122,6 +124,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         }
         container.objectLayer.onTextSelectionChanged = { [weak coordinator] info in
             coordinator?.parent.onTextSelectionChanged(info)
+        }
+        container.objectLayer.onNoteLinkActivated = { [weak coordinator] id in
+            coordinator?.parent.onNoteLinkActivated(id)
         }
 
         // 初期ビューポート(保存がなければ形式ごとの初期位置)
@@ -323,7 +328,13 @@ struct CanvasRepresentable: UIViewRepresentable {
                 .sorted { $0.zOrder < $1.zOrder }
                 .map { object -> CanvasObjectItem in
                     var image: UIImage?
-                    if object.objectKind != .text {
+                    var linkTitle = ""
+                    if object.objectKind == .noteLink {
+                        // リンク先タイトルとサムネイルを毎回引き直す(リネーム等に追従)
+                        let linked = object.resolvedLinkedNote
+                        linkTitle = linked?.displayTitle ?? ""
+                        image = linked?.thumbnailData.flatMap { UIImage(data: $0) }
+                    } else if object.objectKind != .text {
                         if let cached = imageCache[object.objectID] {
                             image = cached
                         } else if let rendered = object.makeDisplayImage() {
@@ -338,7 +349,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         text: object.text ?? "",
                         fontSize: object.fontSize > 0 ? object.fontSize : 24,
                         image: image,
-                        isLocked: object.isLocked
+                        isLocked: object.isLocked,
+                        linkTitle: linkTitle
                     )
                 }
             layer.sync(items: items)

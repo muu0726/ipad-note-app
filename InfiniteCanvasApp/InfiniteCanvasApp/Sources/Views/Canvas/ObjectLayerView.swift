@@ -8,8 +8,9 @@ struct CanvasObjectItem {
     var frame: CGRect        // コンテンツ空間
     var text: String
     var fontSize: CGFloat
-    var image: UIImage?      // image / pdf のレンダリング済み画像(Coordinator がキャッシュ)
+    var image: UIImage?      // image / pdf のレンダリング済み画像(noteLink ではサムネイル)
     var isLocked: Bool = false  // PDF 背景など: 移動・リサイズ・削除・選択を禁止
+    var linkTitle: String = ""  // noteLink: リンク先ノートのタイトル
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -25,6 +26,8 @@ final class ObjectLayerUIView: UIView {
     var onAutoHeightChanged: ((NSManagedObjectID, CGFloat) -> Void)?
     /// 選択が変わったときに「選択中テキストの (id, fontSize)」を通知(テキスト以外や未選択は nil)
     var onTextSelectionChanged: (((objectID: NSManagedObjectID, fontSize: CGFloat)?) -> Void)?
+    /// ノートリンクのダブルタップでリンク先へジャンプする要求
+    var onNoteLinkActivated: ((NSManagedObjectID) -> Void)?
 
     /// 現在のズーム倍率。オブジェクトはコンテンツ空間に直接配置され、スクロール/ズーム追従は
     /// スクロールビュー(PKCanvasView)の合成に任せるため、この値はスナップ閾値・タッチ判定の
@@ -183,6 +186,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private let resizeHandle = UIView()
     private lazy var editMenuInteraction = UIEditMenuInteraction(delegate: self)
 
+    // ノートリンク用カードUI
+    private let linkCard = UIView()
+    private let linkIcon = UIImageView()
+    private let linkTitleLabel = UILabel()
+    private let linkThumb = UIImageView()
+
     init(item: CanvasObjectItem, layerView: ObjectLayerUIView) {
         self.objectID = item.id
         self.kind = item.kind
@@ -210,6 +219,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             imageView.contentMode = .scaleToFill  // アスペクト比はフレーム側で維持する
             imageView.clipsToBounds = true
             addSubview(imageView)
+        case .noteLink:
+            setUpLinkCard()
         }
 
         // 選択チップ: リサイズハンドル(右下)。角に半分かかる配置
@@ -233,6 +244,43 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         addGestureRecognizer(
             UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         )
+
+        // ノートリンクはダブルタップでリンク先へジャンプ
+        if kind == .noteLink {
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleNoteLinkJump))
+            doubleTap.numberOfTapsRequired = 2
+            addGestureRecognizer(doubleTap)
+        }
+    }
+
+    /// ノートリンクのカードUIを構築する(角丸・影・境界線・アイコン+タイトル+サムネイル)
+    private func setUpLinkCard() {
+        linkCard.backgroundColor = .secondarySystemBackground
+        linkCard.layer.cornerRadius = 12
+        linkCard.layer.borderWidth = 0.5
+        linkCard.layer.borderColor = UIColor.separator.cgColor
+        linkCard.layer.shadowColor = UIColor.black.cgColor
+        linkCard.layer.shadowOpacity = 0.12
+        linkCard.layer.shadowRadius = 4
+        linkCard.layer.shadowOffset = CGSize(width: 0, height: 2)
+        linkCard.isUserInteractionEnabled = false
+        addSubview(linkCard)
+
+        linkThumb.contentMode = .scaleAspectFill
+        linkThumb.clipsToBounds = true
+        linkThumb.layer.cornerRadius = 8
+        linkThumb.backgroundColor = .tertiarySystemFill
+        linkCard.addSubview(linkThumb)
+
+        linkIcon.image = UIImage(systemName: "doc.text.fill")
+        linkIcon.tintColor = .systemBlue
+        linkIcon.contentMode = .scaleAspectFit
+        linkCard.addSubview(linkIcon)
+
+        linkTitleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        linkTitleLabel.textColor = .label
+        linkTitleLabel.numberOfLines = 2
+        linkCard.addSubview(linkTitleLabel)
     }
 
     @available(*, unavailable)
@@ -243,6 +291,30 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         imageView.frame = bounds
         textView.frame = bounds
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
+
+        if kind == .noteLink {
+            linkCard.frame = bounds
+            linkCard.layer.shadowPath = UIBezierPath(
+                roundedRect: linkCard.bounds, cornerRadius: linkCard.layer.cornerRadius
+            ).cgPath
+            let inset: CGFloat = 12
+            let hasThumb = linkThumb.image != nil
+            if hasThumb {
+                let side = bounds.height - inset * 2
+                linkThumb.frame = CGRect(x: inset, y: inset, width: side, height: side)
+                linkThumb.isHidden = false
+                linkIcon.isHidden = true
+                let textX = linkThumb.frame.maxX + 12
+                linkTitleLabel.frame = CGRect(x: textX, y: inset, width: bounds.width - textX - inset, height: bounds.height - inset * 2)
+            } else {
+                linkThumb.isHidden = true
+                linkIcon.isHidden = false
+                let iconSide: CGFloat = 24
+                linkIcon.frame = CGRect(x: inset, y: (bounds.height - iconSide) / 2, width: iconSide, height: iconSide)
+                let textX = linkIcon.frame.maxX + 10
+                linkTitleLabel.frame = CGRect(x: textX, y: inset, width: bounds.width - textX - inset, height: bounds.height - inset * 2)
+            }
+        }
     }
 
     /// 角に半分はみ出した削除ボタン/ハンドルも押せるよう当たり判定を広げる。
@@ -265,7 +337,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if kind == .text, !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
-        if let image = item.image { imageView.image = image }
+        if kind == .noteLink {
+            linkTitleLabel.text = item.linkTitle.isEmpty ? "(削除されたノート)" : item.linkTitle
+            linkThumb.image = item.image
+            setNeedsLayout()
+        } else if let image = item.image {
+            imageView.image = image
+        }
         // フォントサイズが変わったら、幅は保ったまま高さを自動拡張して再配置する
         if fontChanged {
             recomputeTextHeight()
@@ -354,6 +432,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         } else if kind == .text {
             beginTextEditing()  // 選択済みのテキストを再タップで編集開始
         }
+    }
+
+    /// ノートリンクのダブルタップ → リンク先ノートを開く
+    @objc private func handleNoteLinkJump() {
+        guard let layerView, layerView.isSelectMode, kind == .noteLink else { return }
+        layerView.onNoteLinkActivated?(objectID)
     }
 
     @objc private func handleMovePan(_ gesture: UIPanGestureRecognizer) {
