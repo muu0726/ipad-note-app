@@ -9,6 +9,7 @@ struct CanvasObjectItem {
     var text: String
     var fontSize: CGFloat
     var image: UIImage?      // image / pdf のレンダリング済み画像(Coordinator がキャッシュ)
+    var isLocked: Bool = false  // PDF 背景など: 移動・リサイズ・削除・選択を禁止
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -168,6 +169,7 @@ final class ObjectLayerUIView: UIView {
 final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractionDelegate {
     let objectID: NSManagedObjectID
     let kind: CanvasObjectKind
+    let isLocked: Bool
     private(set) var contentFrame: CGRect  // コンテンツ空間
     private(set) var isInteracting = false
 
@@ -184,10 +186,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     init(item: CanvasObjectItem, layerView: ObjectLayerUIView) {
         self.objectID = item.id
         self.kind = item.kind
+        self.isLocked = item.isLocked
         self.contentFrame = item.frame
         self.fontSize = item.fontSize
         self.layerView = layerView
         super.init(frame: .zero)
+        // ロック(PDF背景など)は移動・リサイズ・選択・削除・編集を一切受け付けない
+        isUserInteractionEnabled = !item.isLocked
 
         layer.borderColor = UIColor.systemBlue.cgColor
 

@@ -118,6 +118,12 @@ struct NoteCanvasView: View {
                         toolState.selectedTextObject = nil
                     }
                 },
+                onLassoObjectsMoved: { region, delta in
+                    moveObjectsWithLasso(in: region, by: delta)
+                },
+                onLassoObjectsDeleted: { region in
+                    deleteObjectsWithLasso(in: region)
+                },
                 onCanvasReady: { undoBridge.attach($0) }
             )
             .onChange(of: insertion) { _, request in
@@ -236,6 +242,41 @@ struct NoteCanvasView: View {
         note.pageCount = Int16(oldCount - 1)
         note.updatedAt = .now
         persist()
+    }
+
+    // MARK: - 投げ縄でのインクとオブジェクトの連動
+
+    /// 投げ縄で移動したインク領域に中心があるオブジェクトを、同じ差分だけ平行移動する。
+    /// ロック(PDF背景など)は対象外。Undo はインク移動と同一グループにまとまる。
+    private func moveObjectsWithLasso(in region: CGRect, by delta: CGVector) {
+        for object in objects where !object.isDeleted && !object.isLocked
+        && region.contains(CGPoint(x: object.contentFrame.midX, y: object.contentFrame.midY)) {
+            let previous = object.contentFrame
+            object.contentFrame = previous.offsetBy(dx: delta.dx, dy: delta.dy)
+            object.updatedAt = .now
+            if let uuid = object.id {
+                CanvasObjectUndo.registerFrameChange(
+                    objectUUID: uuid, previousFrame: previous,
+                    in: undoBridge.activeUndoManager, context: context, bridge: undoBridge
+                )
+            }
+        }
+        scheduleAutoSave()
+    }
+
+    /// 投げ縄で削除したインク領域に中心があるオブジェクトも削除する(ロックは対象外)。
+    private func deleteObjectsWithLasso(in region: CGRect) {
+        for object in objects where !object.isDeleted && !object.isLocked
+        && region.contains(CGPoint(x: object.contentFrame.midX, y: object.contentFrame.midY)) {
+            if let snapshot = CanvasObjectSnapshot(object: object) {
+                CanvasObjectUndo.registerDelete(
+                    snapshot: snapshot, in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+            context.delete(object)
+        }
+        scheduleAutoSave()
     }
 
     // MARK: - オブジェクト操作の書き戻し

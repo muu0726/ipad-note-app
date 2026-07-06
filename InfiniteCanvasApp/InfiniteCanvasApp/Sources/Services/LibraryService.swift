@@ -1,4 +1,6 @@
 import CoreData
+import PDFKit
+import UIKit
 
 /// フォルダ・ノートに対する操作(作成 / 名前変更 / 移動 / ゴミ箱 / 完全削除)を集約。
 /// すべて viewContext 上で同期実行し、最後に保存する。
@@ -37,6 +39,66 @@ enum LibraryService {
         note.pageCount = 1  // 通常ノートは1ページから開始
         save(context)
         return note
+    }
+
+    /// PDF の全ページを背景に展開した「通常ノート」を新規作成する。
+    /// 各ページのレンダリング画像を、移動・編集・削除不可(isLocked)の背景画像として
+    /// ページ矩形へロック配置する。手書き注釈はその上に描ける。
+    @discardableResult
+    static func createPagedNoteFromPDF(
+        data: Data,
+        titled title: String,
+        folder: Folder?,
+        in context: NSManagedObjectContext
+    ) -> NoteFile? {
+        guard let document = PDFDocument(data: data), document.pageCount > 0 else { return nil }
+
+        let note = NoteFile(context: context)
+        note.id = UUID()
+        note.title = title.isEmpty ? "PDF ノート" : title
+        note.createdAt = .now
+        note.updatedAt = .now
+        note.folder = folder
+        note.pageColor = CanvasPageColor.white.rawValue
+        note.noteType = CanvasNoteType.paged.rawValue
+        note.pageCount = Int16(document.pageCount)
+
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            let rect = PageMetrics.pageRect(index)
+            let object = CanvasObject(context: context)
+            object.id = UUID()
+            object.createdAt = .now
+            object.updatedAt = .now
+            object.note = note
+            object.kind = CanvasObjectKind.image.rawValue
+            object.payload = renderPageImage(page, size: rect.size)?.jpegData(compressionQuality: 0.8)
+            object.contentFrame = rect
+            object.zOrder = Int64(index)  // 背景として最背面(先に追加=低 zOrder)
+            object.isLocked = true         // 移動・リサイズ・削除・選択を禁止
+        }
+        save(context)
+        return note
+    }
+
+    /// PDF ページを指定サイズへ全面フィットでレンダリングする(用紙は白地)。
+    private static func renderPageImage(_ page: PDFPage, size: CGSize) -> UIImage? {
+        let box = page.bounds(for: .mediaBox)
+        guard box.width > 0, box.height > 0 else { return nil }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 2  // Retina 相当で書き込み時もにじまない
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            let cg = ctx.cgContext
+            cg.saveGState()
+            // PDF は左下原点。上下反転しつつページ矩形へスケール
+            cg.translateBy(x: 0, y: size.height)
+            cg.scaleBy(x: size.width / box.width, y: -size.height / box.height)
+            cg.translateBy(x: -box.minX, y: -box.minY)
+            page.draw(with: .mediaBox, to: cg)
+            cg.restoreGState()
+        }
     }
 
     // MARK: - 名前変更

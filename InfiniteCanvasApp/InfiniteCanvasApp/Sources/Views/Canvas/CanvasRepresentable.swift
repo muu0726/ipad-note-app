@@ -58,6 +58,10 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onObjectAutoHeightChanged: (NSManagedObjectID, CGFloat) -> Void
     /// テキスト選択の変化(ツールバーのフォントサイズ UI 用)。テキスト以外/未選択は nil
     let onTextSelectionChanged: ((objectID: NSManagedObjectID, fontSize: CGFloat)?) -> Void
+    /// 投げ縄でインクを移動したとき(元の領域, 移動量)。領域に重なるオブジェクトも移動する
+    let onLassoObjectsMoved: (CGRect, CGVector) -> Void
+    /// 投げ縄でインクを削除したとき(削除された領域)。領域に重なるオブジェクトも削除する
+    let onLassoObjectsDeleted: (CGRect) -> Void
     /// Undo/Redo ブリッジなどにキャンバスを渡す
     let onCanvasReady: (PKCanvasView) -> Void
 
@@ -91,6 +95,7 @@ struct CanvasRepresentable: UIViewRepresentable {
         let canvas = container.canvasView
         canvas.drawing = drawing
         context.coordinator.lastStrokeCount = drawing.strokes.count
+        context.coordinator.seedPreviousDrawing(drawing)
         canvas.tool = pkTool
         canvas.delegate = context.coordinator
         // はみ出し領域の色: 無限は用紙色、通常ノートは机のグレー
@@ -212,6 +217,8 @@ struct CanvasRepresentable: UIViewRepresentable {
         var lastPageCount = 1
         /// 図形置換で drawing を差し替える間の再入を無視するフラグ(無限再描画ループ防止)
         private var isReplacingShape = false
+        /// 投げ縄でのインク移動・削除を差分検知するための直前の描画
+        private var previousDrawing = PKDrawing()
         /// スクロール/ズームのデリゲート処理でレイヤーへアクセスするための弱参照
         private weak var container: CanvasContainerUIView?
         /// image / pdf のレンダリング結果キャッシュ(payload のデコードは1回だけ)
@@ -273,12 +280,38 @@ struct CanvasRepresentable: UIViewRepresentable {
                 canvasView.drawing = newDrawing  // 同期再入しても上のフラグで無視される
                 isReplacingShape = false
             }
+            // 投げ縄ツール中のインク移動・削除を差分検知し、重なるオブジェクトも連動させる
+            if parent.pkTool is PKLassoTool {
+                detectLassoChange(from: previousDrawing, to: canvasView.drawing)
+            }
+            previousDrawing = canvasView.drawing
             lastStrokeCount = canvasView.drawing.strokes.count
 
             isCanvasSourceOfTruth = true
             parent.drawing = canvasView.drawing
             parent.onDrawingChanged()
             isCanvasSourceOfTruth = false
+        }
+
+        /// makeUIView / 差し替え時に基準の描画を設定する
+        func seedPreviousDrawing(_ drawing: PKDrawing) {
+            previousDrawing = drawing
+        }
+
+        // MARK: - 投げ縄によるインクとオブジェクトの連動(要件)
+
+        /// 直前と現在の描画を比較し、投げ縄でのインクの「移動」または「削除」を検知して
+        /// 該当領域のオブジェクトにも同じ操作を適用する。オブジェクト側の Undo は
+        /// PencilKit のストローク Undo と同一イベントで登録され、まとめて元に戻せる。
+        private func detectLassoChange(from old: PKDrawing, to new: PKDrawing) {
+            switch LassoObjectSync.detect(from: old, to: new) {
+            case .moved(let region, let delta):
+                parent.onLassoObjectsMoved(region, delta)
+            case .deleted(let region):
+                parent.onLassoObjectsDeleted(region)
+            case nil:
+                break
+            }
         }
 
         // MARK: - オブジェクト同期(要件③)
@@ -304,7 +337,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         frame: object.contentFrame,
                         text: object.text ?? "",
                         fontSize: object.fontSize > 0 ? object.fontSize : 24,
-                        image: image
+                        image: image,
+                        isLocked: object.isLocked
                     )
                 }
             layer.sync(items: items)

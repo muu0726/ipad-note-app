@@ -2,7 +2,119 @@ import Testing
 import CoreData
 import PencilKit
 import CoreTransferable
+import UIKit
 @testable import InfiniteCanvasApp
+
+// MARK: - 投げ縄とオブジェクトの連動
+
+@Suite("投げ縄のインク差分検知")
+struct LassoObjectSyncTests {
+
+    /// 指定領域あたりに小さなストロークを作る
+    private func stroke(at origin: CGPoint) -> PKStroke {
+        let points = (0...10).map { i -> PKStrokePoint in
+            PKStrokePoint(
+                location: CGPoint(x: origin.x + CGFloat(i) * 4, y: origin.y),
+                timeOffset: TimeInterval(i) * 0.01,
+                size: CGSize(width: 3, height: 3), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2
+            )
+        }
+        return PKStroke(ink: PKInk(.pen, color: .black),
+                        path: PKStrokePath(controlPoints: points, creationDate: Date()))
+    }
+
+    /// stroke を平行移動した複製
+    private func moved(_ s: PKStroke, by delta: CGVector) -> PKStroke {
+        PKStroke(ink: s.ink, path: s.path,
+                 transform: CGAffineTransform(translationX: delta.dx, y: delta.dy))
+    }
+
+    @Test("ストロークの平行移動を移動として検知する")
+    func detectsMove() {
+        let a = stroke(at: CGPoint(x: 100, y: 100))
+        let b = stroke(at: CGPoint(x: 400, y: 400))  // 動かさない
+        let before = PKDrawing(strokes: [a, b])
+        let after = PKDrawing(strokes: [moved(a, by: CGVector(dx: 120, dy: 60)), b])
+
+        guard case .moved(let region, let delta) = LassoObjectSync.detect(from: before, to: after) else {
+            Issue.record("移動として検知されなかった")
+            return
+        }
+        #expect(abs(delta.dx - 120) < 3 && abs(delta.dy - 60) < 3)
+        #expect(region.midX > 90 && region.midX < 160)  // 動かした a の元領域
+    }
+
+    @Test("ストロークの削除を削除として検知する")
+    func detectsDelete() {
+        let a = stroke(at: CGPoint(x: 100, y: 100))
+        let b = stroke(at: CGPoint(x: 400, y: 400))
+        let before = PKDrawing(strokes: [a, b])
+        let after = PKDrawing(strokes: [b])  // a を消す
+
+        guard case .deleted(let region) = LassoObjectSync.detect(from: before, to: after) else {
+            Issue.record("削除として検知されなかった")
+            return
+        }
+        #expect(region.midX > 90 && region.midX < 160)
+    }
+
+    @Test("ストローク追加(通常描画)は移動・削除と誤検知しない")
+    func ignoresPlainAdd() {
+        let a = stroke(at: CGPoint(x: 100, y: 100))
+        let before = PKDrawing(strokes: [a])
+        let after = PKDrawing(strokes: [a, stroke(at: CGPoint(x: 500, y: 500))])
+        #expect(LassoObjectSync.detect(from: before, to: after) == nil)
+    }
+}
+
+// MARK: - PDF 背景インポート
+
+@Suite("PDF背景インポート")
+struct PDFImportTests {
+
+    /// テスト用に pages ページの PDF データを生成する
+    private func makePDF(pages: Int) -> Data {
+        let bounds = CGRect(x: 0, y: 0, width: 612, height: 792)  // US Letter
+        return UIGraphicsPDFRenderer(bounds: bounds).pdfData { ctx in
+            for i in 0..<pages {
+                ctx.beginPage()
+                ("Page \(i + 1)" as NSString).draw(
+                    at: CGPoint(x: 50, y: 50),
+                    withAttributes: [.font: UIFont.systemFont(ofSize: 40)]
+                )
+            }
+        }
+    }
+
+    @Test("PDFの全ページが背景ロック画像として通常ノートへ展開される")
+    func pdfExpandsToLockedPagedNote() throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let note = try #require(
+            LibraryService.createPagedNoteFromPDF(data: makePDF(pages: 3), titled: "資料", folder: nil, in: context)
+        )
+        #expect(note.canvasNoteType == .paged)
+        #expect(note.pageCount == 3)
+
+        let objects = ((note.objects as? Set<CanvasObject>) ?? []).sorted { $0.zOrder < $1.zOrder }
+        #expect(objects.count == 3)
+        for object in objects {
+            #expect(object.objectKind == .image)   // 背景は画像オブジェクト
+            #expect(object.isLocked)               // 移動・削除不可
+            #expect(object.payload != nil)         // レンダリング画像を保持
+        }
+        // 各ページのY座標範囲へロック配置されている
+        for (index, object) in objects.enumerated() {
+            #expect(abs(object.contentFrame.minY - PageMetrics.pageRect(index).minY) < 0.5)
+            #expect(object.contentFrame.width == PageMetrics.width)
+        }
+    }
+
+    @Test("ページの無い/壊れたデータでは nil を返す")
+    func invalidPDFReturnsNil() {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        #expect(LibraryService.createPagedNoteFromPDF(data: Data([0, 1, 2]), titled: "", folder: nil, in: context) == nil)
+    }
+}
 
 // MARK: - PenToolState
 

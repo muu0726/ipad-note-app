@@ -18,6 +18,9 @@ struct CanvasTabsView: View {
     @State private var isPhotoPickerPresented = false
     @State private var photoSelection: PhotosPickerItem?
     @State private var isPDFImporterPresented = false
+    // PDF 取り込み方法の選択(オブジェクト挿入 / 新規ノート背景)
+    @State private var pendingPDFData: Data?
+    @State private var showPDFImportChoice = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,8 +61,22 @@ struct CanvasTabsView: View {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
             if let data = try? Data(contentsOf: url) {
-                pendingInsertion = .pdf(data)
+                // 取り込み方法(オブジェクト挿入 / 新規ノート背景)を選ばせる
+                pendingPDFData = data
+                showPDFImportChoice = true
             }
+        }
+        .confirmationDialog("PDF の取り込み方法", isPresented: $showPDFImportChoice, titleVisibility: .visible) {
+            Button("オブジェクトとして挿入") {
+                if let data = pendingPDFData { pendingInsertion = .pdf(data) }
+                pendingPDFData = nil
+            }
+            Button("新規ノートとして背景インポート") {
+                importPDFAsPagedNote()
+            }
+            Button("キャンセル", role: .cancel) { pendingPDFData = nil }
+        } message: {
+            Text("各ページを全画面の背景に展開して、その上に手書きできます。")
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -120,6 +137,17 @@ struct CanvasTabsView: View {
         note.backgroundStyle = style.rawValue
         note.updatedAt = .now
         try? context.save()
+    }
+
+    /// PDF の全ページを背景に展開した新規通常ノートを作成して開く。
+    private func importPDFAsPagedNote() {
+        defer { pendingPDFData = nil }
+        guard let data = pendingPDFData,
+              let note = LibraryService.createPagedNoteFromPDF(
+                  data: data, titled: "", folder: nil, in: context
+              )
+        else { return }
+        session.open(note)  // タブで開く(通常ノートとして全ページ縦並び)
     }
 
     /// 選択中テキストのフォントサイズを変更し、Core Data 保存 + Undo 登録する。
