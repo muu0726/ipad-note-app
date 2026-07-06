@@ -16,6 +16,10 @@ Goodnotes / フリーボード風の無限キャンバス・ノートアプリ�
 - [x] ④ オブジェクトのスナップ(他オブジェクトの端・中心 + グリッドへ吸着、ガイド線表示)
 - [x] ⑤ 自由ノート風ツールバー改善(戻る / やり直し・なぞって消える消しゴム・
       オブジェクトの長押し削除・ノート作成時の用紙色選択 白 / 黒)
+- [x] ⑥ オブジェクトの Undo/Redo・図形認識(手書き→整形)・投げ縄でのオブジェクト連動移動 / 削除
+- [x] ⑦ 通常ノート(ページ制)…A4 縦並び・ページ追加 / 削除・PDF 全ページ背景インポート
+- [x] ⑧ テキストのフォントサイズ変更(12〜72pt)・ビューポート永続化(再起動後に復元)
+- [x] ⑨ ノートリンク(他ノートへのショートカットカード・ダブルタップでタブ切替 / ジャンプ)
 
 ## ディレクトリ構成
 
@@ -36,10 +40,11 @@ InfiniteCanvasApp/InfiniteCanvasApp/Sources/
 │   ├── CanvasObject+Helpers.swift       # オブジェクト種別 / フレーム / PDF レンダリング
 │   └── LibraryItem.swift                # フォルダ/ノート共通ラッパー
 ├── Services/
-│   ├── LibraryService.swift             # 作成/名前変更/移動/ゴミ箱/削除
-│   └── LibraryActionCoordinator.swift   # ダイアログ状態の一元管理
+│   ├── LibraryService.swift             # 作成/名前変更/移動/ゴミ箱/削除・PDF→通常ノート生成
+│   ├── LibraryActionCoordinator.swift   # ダイアログ状態の一元管理
+│   └── ShapeRecognizer.swift            # 手書きストロークの図形認識(直線 / 矩形 / 円など)
 ├── Session/
-│   └── OpenNotesSession.swift           # 開いているタブの管理
+│   └── OpenNotesSession.swift           # 開いているタブ・選択・ビューポートの管理と UserDefaults 永続化
 └── Views/
     ├── RootView.swift                   # NavigationSplitView (2カラム)
     ├── Sidebar/                         # 再帰ツリー (DisclosureGroup)
@@ -88,6 +93,38 @@ InfiniteCanvasApp/InfiniteCanvasApp/Sources/
   白紙 = 黒い罫線・ドット / 黒紙 = 白い罫線・ドット。テキストオブジェクトとサムネイルも連動。
   用紙と同色のペンで開いた場合は自動で反転色に切り替え(黒紙で黒ペン → 白ペン)
 
+## 設計メモ (⑥ オブジェクト Undo / 図形認識 / 投げ縄連動)
+
+- **オブジェクト Undo/Redo**: `CanvasObjectUndo` が挿入 / 移動 / テキスト / フォント / 削除 /
+  ページ構造変更を `undoManager` に登録。描画の Undo と同じ 1 本のスタックに積む
+- **図形認識**: `ShapeRecognizer.recognize(points:)` が点列から直線 / 矩形 / 円などへ整形。
+  ツールバーの図形アシスト(`toolbar-shape-assist`)ON 時に手書きストロークを差し替える。
+  幾何ロジックは `ShapeRecognizerTests` でユニット担保(XCUITest はフリーハンド曲線を描けないため)
+- **投げ縄連動**: 投げ縄で選択したインク領域の移動 / 削除に合わせ、その領域に中心があるオブジェクトも
+  同じ差分で平行移動 / 削除(ロック済み PDF 背景は対象外)。Undo はインク操作と同一グループ
+
+## 設計メモ (⑦ 通常ノート / PDF 背景インポート)
+
+- **通常ノート(paged)**: `NoteFile.noteType = "paged"` / `pageCount`。A4 = 800×1130pt を縦に
+  ページ間 20pt で並べる疑似ページ。右下のフローティングボタンでページ追加 / 削除
+- **ページ削除**: 最後のページ(`pageCount > 1`・確認アラートあり)を削除。そのページの Y 範囲に
+  中心があるインク・オブジェクトも一括削除し、ページ数・描画・オブジェクト削除を 1 つの Undo グループに
+- **PDF 背景インポート**: PDF ピッカー後の確認ダイアログで「新規ノートとして背景インポート」を選ぶと
+  `LibraryService.createPagedNoteFromPDF` が pageCount = N の通常ノートを生成し、各ページを
+  `isLocked` 画像として背景に敷く(その上に手書き注釈できる)。ユニット担保は `PDFImportTests`
+
+## 設計メモ (⑨ ノートリンク)
+
+- **モデル**: `CanvasObject.kind = "noteLink"` + `linkedNoteUUID`(リンク先 NoteFile の UUID 文字列)。
+  `resolvedLinkedNote` が UUID からノートを引き、ゴミ箱 / 削除済みなら nil を返す
+- **挿入**: ツールバー挿入メニュー →「ノートリンク」→ `NoteLinkPickerView` でゴミ箱以外・自分以外の
+  ノートを選択 → 選んだノートの UUID を持つカードをビューポート中央へ配置
+- **カード描画**: 角丸 + 淡い影 + 細線境界の `doc.text.fill` アイコン + タイトル(サムネイルがあれば
+  左にプレビュー)。タイトルは同期のたびに UUID から引き直すためリネームに追従する
+- **ジャンプ**: 選択モードでカードをダブルタップ → `onNoteLinkActivated` → `OpenNotesSession.open` で
+  リンク先タブを開く / 切り替え。リンク先がゴミ箱 / 削除済みなら「(削除されたノート)」表示になり
+  ジャンプしない(ダングリングリンクで壊れない。`NoteLinkUITests` が実機操作で検証)
+
 ## 設計メモ (②③④)
 
 - **無限キャンバス**: PKCanvasView は UIScrollView のサブクラスであることを利用し、
@@ -98,8 +135,8 @@ InfiniteCanvasApp/InfiniteCanvasApp/Sources/
   `NoteFile.canvasData` に保存 + サムネイル生成。タブ切替・ライブラリ復帰時は即時保存
 - **背景**: スクリーン空間で描画する `BackgroundPatternUIView` が contentOffset / zoomScale に
   追従(KVO)。ズームアウト時は格子間隔を自動で粗くする
-- **ビューポート**: タブごとのスクロール位置・ズームを `OpenNotesSession.viewports` に保持
-  (アプリ再起動後の復元は未実装)
+- **ビューポート**: タブごとのスクロール位置・ズームを `OpenNotesSession.viewports` に保持し、
+  デバウンスして UserDefaults に永続化。アプリ再起動後も各ノートの表示位置を復元する
 
 ## 設計メモ (①)
 
