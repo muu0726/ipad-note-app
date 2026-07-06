@@ -9,6 +9,7 @@ struct CanvasObjectItem {
     var text: String
     var fontSize: CGFloat
     var image: UIImage?      // image / pdf のレンダリング済み画像(Coordinator がキャッシュ)
+    var isLocked: Bool = false  // PDF 背景など: 移動・リサイズ・削除・選択を禁止
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -20,6 +21,10 @@ final class ObjectLayerUIView: UIView {
     var onFrameChanged: ((NSManagedObjectID, CGRect) -> Void)?
     var onTextChanged: ((NSManagedObjectID, String) -> Void)?
     var onDelete: ((NSManagedObjectID) -> Void)?
+    /// フォントサイズ変更時の高さ自動調整を Undo 無しで保存するための書き戻し
+    var onAutoHeightChanged: ((NSManagedObjectID, CGFloat) -> Void)?
+    /// 選択が変わったときに「選択中テキストの (id, fontSize)」を通知(テキスト以外や未選択は nil)
+    var onTextSelectionChanged: (((objectID: NSManagedObjectID, fontSize: CGFloat)?) -> Void)?
 
     /// 現在のズーム倍率。オブジェクトはコンテンツ空間に直接配置され、スクロール/ズーム追従は
     /// スクロールビュー(PKCanvasView)の合成に任せるため、この値はスナップ閾値・タッチ判定の
@@ -95,6 +100,21 @@ final class ObjectLayerUIView: UIView {
         if let old = selectedID { objectViews[old]?.setSelected(false) }
         selectedID = id
         if let id { objectViews[id]?.setSelected(true) }
+        notifyTextSelection()
+    }
+
+    /// 選択中テキストのフォントサイズ等が変わったときにツールバー表示を更新する(Undo/Redo 追従)
+    func refreshSelectionInfo() {
+        notifyTextSelection()
+    }
+
+    /// 選択中がテキストなら (id, fontSize) を、そうでなければ nil をツールバーへ通知
+    private func notifyTextSelection() {
+        if let id = selectedID, let view = objectViews[id], view.kind == .text {
+            onTextSelectionChanged?((objectID: id, fontSize: view.currentFontSize))
+        } else {
+            onTextSelectionChanged?(nil)
+        }
     }
 
     /// 挿入直後のフォーカス。テキストならそのまま編集を開始する
@@ -149,6 +169,7 @@ final class ObjectLayerUIView: UIView {
 final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractionDelegate {
     let objectID: NSManagedObjectID
     let kind: CanvasObjectKind
+    let isLocked: Bool
     private(set) var contentFrame: CGRect  // コンテンツ空間
     private(set) var isInteracting = false
 
@@ -165,10 +186,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     init(item: CanvasObjectItem, layerView: ObjectLayerUIView) {
         self.objectID = item.id
         self.kind = item.kind
+        self.isLocked = item.isLocked
         self.contentFrame = item.frame
         self.fontSize = item.fontSize
         self.layerView = layerView
         super.init(frame: .zero)
+        // ロック(PDF背景など)は移動・リサイズ・選択・削除・編集を一切受け付けない
+        isUserInteractionEnabled = !item.isLocked
 
         layer.borderColor = UIColor.systemBlue.cgColor
 
@@ -230,15 +254,38 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
     // MARK: - モデル反映
 
+    /// 現在のフォントサイズ(ツールバーの表示・選択通知に使う)
+    var currentFontSize: CGFloat { fontSize }
+
     func apply(_ item: CanvasObjectItem) {
         guard !isInteracting else { return }
+        let fontChanged = kind == .text && fontSize != item.fontSize
         contentFrame = item.frame
         fontSize = item.fontSize
         if kind == .text, !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
         if let image = item.image { imageView.image = image }
+        // フォントサイズが変わったら、幅は保ったまま高さを自動拡張して再配置する
+        if fontChanged {
+            recomputeTextHeight()
+            if isSelected { layerView?.refreshSelectionInfo() }  // ツールバー表示も更新
+        }
         applyPlacement()
+    }
+
+    /// フォントサイズや文字数に合わせて高さを再計算し、変わっていれば保存(Undo なし)。
+    /// テキストは現在の幅で折り返すため、A4幅(paged)をはみ出さず縦に伸びる。
+    private func recomputeTextHeight() {
+        textView.font = .systemFont(ofSize: fontSize)
+        let fitting = textView.sizeThatFits(
+            CGSize(width: contentFrame.width, height: .greatestFiniteMagnitude)
+        )
+        let newHeight = max(40, fitting.height)
+        if abs(newHeight - contentFrame.height) > 0.5 {
+            contentFrame.size.height = newHeight
+            layerView?.onAutoHeightChanged?(objectID, newHeight)
+        }
     }
 
     /// コンテンツ空間へ直接配置する。スクロール/ズームへの追従はスクロールビューの合成が行う

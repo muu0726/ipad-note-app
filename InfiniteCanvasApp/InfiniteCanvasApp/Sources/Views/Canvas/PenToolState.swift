@@ -1,9 +1,16 @@
 import SwiftUI
 import PencilKit
 import Combine
+import CoreData
 
 enum CanvasTool: String, CaseIterable {
     case selector, lasso, pen, marker, eraser
+}
+
+/// 選択中のテキストオブジェクト情報(ツールバーのフォントサイズ UI 用)
+struct SelectedTextObject: Equatable {
+    let objectID: NSManagedObjectID
+    var fontSize: CGFloat
 }
 
 /// ノート作成時に選ぶ用紙の色(白 / 黒)。
@@ -78,6 +85,13 @@ final class PenToolState: ObservableObject {
     /// 図形認識アシスト。ON のとき、描き終えたストロークが直線・楕円・矩形に近ければ
     /// きれいな図形へ自動置換する。誤判定を嫌うユーザー向けに既定は OFF。
     @Published var isShapeAssistEnabled = false
+
+    /// 選択ツールで選択中のテキストオブジェクト(なければ nil)。
+    /// これが非nilかつ選択モードのときツールバーにフォントサイズ変更UIを出す。
+    @Published var selectedTextObject: SelectedTextObject?
+
+    /// フォントサイズの調整範囲(pt)
+    static let fontSizeRange: ClosedRange<CGFloat> = 12...72
 
     var currentWidth: CGFloat {
         get { widths[tool] ?? 3 }

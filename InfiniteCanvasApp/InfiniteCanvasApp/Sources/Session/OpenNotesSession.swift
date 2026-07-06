@@ -17,6 +17,26 @@ final class OpenNotesSession: ObservableObject {
     /// 描画のたびに更新されるため @Published にはしない(再描画ループ防止)
     var viewports: [NSManagedObjectID: CanvasViewport] = [:]
 
+    /// ビューポート保存のデバウンス(スクロール中の高頻度書き込みを防ぐ)
+    private var viewportSaveTask: Task<Void, Never>?
+
+    /// スクロール/ズーム時に呼ぶ。メモリを更新し、デバウンスして UserDefaults へ保存する。
+    func updateViewport(_ viewport: CanvasViewport, for objectID: NSManagedObjectID) {
+        viewports[objectID] = viewport
+        viewportSaveTask?.cancel()
+        viewportSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            self?.persistState()
+        }
+    }
+
+    /// 保留中のビューポート保存を即時確定させる(タブ切替・アプリ終了時)。
+    func flushViewports() {
+        viewportSaveTask?.cancel()
+        persistState()
+    }
+
     // MARK: - タブ操作
 
     /// ノートをタブで開く。既に開いていればそのタブへ切り替える(重複タブは作らない)
@@ -67,6 +87,7 @@ final class OpenNotesSession: ObservableObject {
         static let openNoteURIs = "session.openNoteURIs"
         static let selectedNoteURI = "session.selectedNoteURI"
         static let isCanvasVisible = "session.isCanvasVisible"
+        static let viewports = "session.viewports"
     }
 
     /// 復元前に persistState が走って保存済みデータを消さないようにするフラグ
@@ -78,6 +99,8 @@ final class OpenNotesSession: ObservableObject {
         isRestored = true
 
         let defaults = UserDefaults.standard
+        restoreViewports(from: defaults, in: context)  // タブの有無に関わらずビューポートは読む
+
         guard let uris = defaults.stringArray(forKey: DefaultsKey.openNoteURIs),
               !uris.isEmpty else { return }
 
@@ -119,5 +142,36 @@ final class OpenNotesSession: ObservableObject {
             forKey: DefaultsKey.selectedNoteURI
         )
         defaults.set(isCanvasVisible, forKey: DefaultsKey.isCanvasVisible)
+        defaults.set(serializedViewports(), forKey: DefaultsKey.viewports)
+    }
+
+    // MARK: - ビューポートの永続化
+
+    /// NSManagedObjectID は永続キーにできないため URI 文字列をキーに辞書化する。
+    /// 形式: ["<uri>": ["x": .., "y": .., "zoom": ..]]
+    private func serializedViewports() -> [String: [String: Double]] {
+        var result: [String: [String: Double]] = [:]
+        for (objectID, viewport) in viewports where !objectID.isTemporaryID {
+            let uri = objectID.uriRepresentation().absoluteString
+            result[uri] = [
+                "x": Double(viewport.contentOffset.x),
+                "y": Double(viewport.contentOffset.y),
+                "zoom": Double(viewport.zoomScale),
+            ]
+        }
+        return result
+    }
+
+    private func restoreViewports(from defaults: UserDefaults, in context: NSManagedObjectContext) {
+        guard let stored = defaults.dictionary(forKey: DefaultsKey.viewports) as? [String: [String: Double]],
+              let coordinator = context.persistentStoreCoordinator else { return }
+        for (uri, values) in stored {
+            guard let url = URL(string: uri),
+                  let objectID = coordinator.managedObjectID(forURIRepresentation: url) else { continue }
+            viewports[objectID] = CanvasViewport(
+                contentOffset: CGPoint(x: values["x"] ?? 0, y: values["y"] ?? 0),
+                zoomScale: CGFloat(values["zoom"] ?? 1)
+            )
+        }
     }
 }

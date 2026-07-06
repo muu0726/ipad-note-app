@@ -56,7 +56,66 @@ final class PagedNoteUITests: XCTestCase {
         XCTAssertTrue(addPage.isHittable, "ページ追加後にUIが操作不能(ハング)")
     }
 
+    @MainActor
+    func testDeletePageRemovesObjectsAndUndoRestores() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launch()
+        createPagedNote(app)
+
+        // 2ページ目を追加して、そのページへスクロール
+        let addPage = app.buttons["canvas-add-page"]
+        XCTAssertTrue(addPage.waitForExistence(timeout: 5), "ページ追加ボタンが出ない")
+        addPage.tap()
+        _ = app.buttons["toolbar-tool-pen"].waitForExistence(timeout: 3)
+
+        // 2ページ目にテキストオブジェクトを挿入
+        let marker = "\(Int.random(in: 10_000_000...99_999_999))"
+        app.buttons["toolbar-insert-menu"].tap()
+        app.buttons["テキスト"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "編集が始まらない")
+        app.typeText(marker)
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.28)).tap()
+        _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 5)
+        let markerView = app.textViews.containing(NSPredicate(format: "value CONTAINS %@", marker)).firstMatch
+        XCTAssertTrue(markerView.waitForExistence(timeout: 5), "テキストが2ページ目に置けていない")
+
+        // ページ削除(確認アラート → 削除)
+        let deletePage = app.buttons["canvas-delete-page"]
+        XCTAssertTrue(deletePage.waitForExistence(timeout: 3), "ページ削除ボタンが出ない")
+        deletePage.tap()
+        app.buttons["削除"].tap()
+
+        // 2ページ目のオブジェクトが消え、ページ数が1に戻る(削除ボタンが消える)
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: markerView)
+        waitForExpectations(timeout: 5)
+        XCTAssertFalse(deletePage.exists, "ページが減っていない(削除ボタンが残っている)")
+        attachScreenshot(app, name: "1-after-delete-page")
+
+        // Undo でページとオブジェクトが復活する
+        app.buttons["toolbar-undo"].tap()
+        XCTAssertTrue(markerView.waitForExistence(timeout: 5), "Undo でオブジェクトが復活しない")
+        XCTAssertTrue(app.buttons["canvas-delete-page"].waitForExistence(timeout: 3),
+                      "Undo でページ数が戻っていない")
+        attachScreenshot(app, name: "2-after-undo")
+    }
+
     // MARK: - ヘルパー
+
+    /// 「通常ノート」を新規作成して開く
+    @MainActor
+    private func createPagedNote(_ app: XCUIApplication) {
+        let backToLibrary = app.buttons["書類"]
+        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let addTile = app.buttons["add-note-tile"]
+        if addTile.waitForExistence(timeout: 5) { addTile.tap() }
+        else { app.buttons["新規ノート"].firstMatch.tap() }
+        let pagedSegment = app.segmentedControls.buttons["通常ノート"]
+        _ = pagedSegment.waitForExistence(timeout: 5)
+        pagedSegment.tap()
+        app.buttons["作成"].tap()
+        _ = backToLibrary.waitForExistence(timeout: 5)
+    }
 
     @MainActor
     private func drag(_ canvas: XCUIElement, from: (CGFloat, CGFloat), to: (CGFloat, CGFloat)) {
