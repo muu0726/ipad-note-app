@@ -21,6 +21,8 @@ struct CanvasTabsView: View {
     // PDF 取り込み方法の選択(オブジェクト挿入 / 新規ノート背景)
     @State private var pendingPDFData: Data?
     @State private var showPDFImportChoice = false
+    // ノートリンク挿入時のリンク先選択シート
+    @State private var showNoteLinkPicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,6 +33,7 @@ struct CanvasTabsView: View {
                 onInsertText: { pendingInsertion = .text },
                 onInsertImage: { isPhotoPickerPresented = true },
                 onInsertPDF: { isPDFImporterPresented = true },
+                onInsertNoteLink: { showNoteLinkPicker = true },
                 onFontSizeChange: changeSelectedTextFontSize
             )
             Divider()
@@ -64,6 +67,12 @@ struct CanvasTabsView: View {
                 // 取り込み方法(オブジェクト挿入 / 新規ノート背景)を選ばせる
                 pendingPDFData = data
                 showPDFImportChoice = true
+            }
+        }
+        .sheet(isPresented: $showNoteLinkPicker) {
+            NoteLinkPickerView(excludingNoteID: session.selectedNote?.objectID) { selected in
+                if let uuid = selected.id { pendingInsertion = .noteLink(uuid) }
+                showNoteLinkPicker = false
             }
         }
         .confirmationDialog("PDF の取り込み方法", isPresented: $showPDFImportChoice, titleVisibility: .visible) {
@@ -203,6 +212,49 @@ struct NoteTabBar: View {
             }
         }
         .background(Color(.secondarySystemBackground))
+    }
+}
+
+/// ノートリンク挿入時に、リンク先のノートを一覧から選ぶシート。
+/// ゴミ箱以外の全ノートを表示し、現在のノートは除外する。
+struct NoteLinkPickerView: View {
+    let excludingNoteID: NSManagedObjectID?
+    let onSelect: (NoteFile) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @FetchRequest(
+        entity: NoteFile.entity(),
+        sortDescriptors: [NSSortDescriptor(keyPath: \NoteFile.updatedAt, ascending: false)],
+        predicate: NSPredicate(format: "isTrashed == NO")
+    ) private var notes: FetchedResults<NoteFile>
+
+    private var selectableNotes: [NoteFile] {
+        notes.filter { $0.objectID != excludingNoteID }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if selectableNotes.isEmpty {
+                    ContentUnavailableView("他のノートがありません", systemImage: "doc")
+                } else {
+                    List(selectableNotes, id: \.objectID) { note in
+                        Button { onSelect(note) } label: {
+                            Label(note.displayTitle, systemImage: "doc.text")
+                                .foregroundStyle(.primary)
+                        }
+                        .accessibilityIdentifier("notelink-pick-\(note.displayTitle)")
+                    }
+                }
+            }
+            .navigationTitle("リンク先のノート")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { dismiss() }
+                }
+            }
+        }
     }
 }
 
