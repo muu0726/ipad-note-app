@@ -18,6 +18,8 @@ struct NoteCanvasView: View {
     @ObservedObject var toolState: PenToolState
     let undoBridge: CanvasUndoBridge
     @Binding var insertion: ObjectInsertion?
+    /// 分割表示でこのキャンバスが操作されたら呼ぶ(アクティブ側の切替に使う)
+    var onActivate: () -> Void = {}
     @EnvironmentObject private var session: OpenNotesSession
     @Environment(\.managedObjectContext) private var context
 
@@ -26,17 +28,20 @@ struct NoteCanvasView: View {
     @State private var saveTask: Task<Void, Never>?
     @State private var autoFocusObjectID: NSManagedObjectID?
     @State private var showDeletePageConfirm = false
+    @State private var showNoteSettings = false
 
     init(
         note: NoteFile,
         toolState: PenToolState,
         undoBridge: CanvasUndoBridge,
-        insertion: Binding<ObjectInsertion?>
+        insertion: Binding<ObjectInsertion?>,
+        onActivate: @escaping () -> Void = {}
     ) {
         _note = ObservedObject(wrappedValue: note)
         _toolState = ObservedObject(wrappedValue: toolState)
         self.undoBridge = undoBridge
         _insertion = insertion
+        self.onActivate = onActivate
         _objects = FetchRequest(
             entity: CanvasObject.entity(),
             sortDescriptors: [NSSortDescriptor(keyPath: \CanvasObject.zOrder, ascending: true)],
@@ -60,10 +65,13 @@ struct NoteCanvasView: View {
                 pageColor: note.canvasPageColor,
                 noteType: note.canvasNoteType,
                 pageCount: note.resolvedPageCount,
+                isTwoPageLayout: note.isTwoPageLayout,
+                isHorizontalScroll: note.isHorizontalScroll,
                 objects: Array(objects),
                 autoFocusObjectID: autoFocusObjectID,
                 initialViewport: session.viewports[note.objectID],
                 onDrawingChanged: {
+                    onActivate()          // 描いた側を分割のアクティブ側にする
                     scheduleAutoSave()
                     undoBridge.refresh()  // 描画のたびに戻る/やり直しボタンの状態を更新
                 },
@@ -152,6 +160,22 @@ struct NoteCanvasView: View {
                 Text("このページ上の手書きとオブジェクトも削除されますがよろしいですか？")
             }
         }
+        // 通常ノートのレイアウト設定(見開き / 横スクロール)
+        .toolbar {
+            if note.canvasNoteType == .paged {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showNoteSettings.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .accessibilityIdentifier("paged-settings-button")
+                    .popover(isPresented: $showNoteSettings) {
+                        pagedSettingsPopover
+                    }
+                }
+            }
+        }
         .onAppear {
             // 用紙と同色で見えないペン色になっていたら反転色へ(黒紙で黒ペン等)
             let page = note.canvasPageColor
@@ -165,6 +189,40 @@ struct NoteCanvasView: View {
             persist()
             session.flushViewports()  // 保留中のスクロール位置も確定
             toolState.selectedTextObject = nil  // 別タブへ選択を持ち越さない
+        }
+    }
+
+    // MARK: - ノートのレイアウト設定(見開き / 横スクロール)
+
+    private var pagedSettingsPopover: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("ページ表示")
+                .font(.headline)
+                .padding(.bottom, 4)
+            Toggle("見開き2ページ表示", isOn: Binding(
+                get: { note.isTwoPageLayout },
+                set: { setLayout(twoPage: $0, horizontal: note.isHorizontalScroll) }
+            ))
+            .accessibilityIdentifier("toggle-two-page")
+            Toggle("横スクロール (ページめくり)", isOn: Binding(
+                get: { note.isHorizontalScroll },
+                set: { setLayout(twoPage: note.isTwoPageLayout, horizontal: $0) }
+            ))
+            .accessibilityIdentifier("toggle-horizontal-scroll")
+        }
+        .padding(20)
+        .frame(width: 300)
+    }
+
+    /// レイアウト設定を更新して保存する(キャンバスは note の変化を検知して即時に組み替わる)。
+    private func setLayout(twoPage: Bool, horizontal: Bool) {
+        note.isTwoPageLayout = twoPage
+        note.isHorizontalScroll = horizontal
+        note.updatedAt = .now
+        do {
+            try context.save()
+        } catch {
+            assertionFailure("レイアウト設定の保存に失敗: \(error)")
         }
     }
 
@@ -214,12 +272,20 @@ struct NoteCanvasView: View {
     private func deleteLastPage() {
         guard note.canvasNoteType == .paged, note.resolvedPageCount > 1 else { return }
         let oldCount = Int(note.pageCount)
-        // 削除対象ページの開始 Y = (pageCount - 1) * (ページ高 + ギャップ)。以降がすべて対象。
-        let yStart = CGFloat(oldCount - 1) * (PageMetrics.height + PageMetrics.gap)
+        // 削除対象は「最後のページ」の矩形。レイアウト(見開き/スクロール方向)に応じて位置が変わる。
+        let layout = PagedLayoutCalculator(
+            pageCount: oldCount,
+            isTwoPageLayout: note.isTwoPageLayout,
+            isHorizontalScroll: note.isHorizontalScroll
+        )
+        let lastRect = layout.pageRect(oldCount - 1)
+        func isOnLastPage(_ rect: CGRect) -> Bool {
+            lastRect.contains(CGPoint(x: rect.midX, y: rect.midY))
+        }
         let manager = undoBridge.activeUndoManager
 
-        // 1) オブジェクト: contentFrame の中心が削除領域にあるものを削除(Undo 登録付き)
-        for object in objects where !object.isDeleted && object.contentFrame.midY >= yStart {
+        // 1) オブジェクト: contentFrame の中心が削除ページにあるものを削除(Undo 登録付き)
+        for object in objects where !object.isDeleted && isOnLastPage(object.contentFrame) {
             if let snapshot = CanvasObjectSnapshot(object: object) {
                 CanvasObjectUndo.registerDelete(
                     snapshot: snapshot, in: manager, context: context, bridge: undoBridge
@@ -228,10 +294,10 @@ struct NoteCanvasView: View {
             context.delete(object)
         }
 
-        // 2) 手書き: ストロークの描画範囲の中心が削除領域にあるものを除去
+        // 2) 手書き: ストロークの描画範囲の中心が削除ページにあるものを除去
         let drawingBefore = drawing
         var drawingAfter = drawing
-        drawingAfter.strokes.removeAll { $0.renderBounds.midY >= yStart }
+        drawingAfter.strokes.removeAll { isOnLastPage($0.renderBounds) }
 
         // 3) ページ数と描画の一括変更を Undo に積む(上のオブジェクト削除と同一グループ)
         CanvasObjectUndo.registerPageStructureChange(
@@ -298,6 +364,7 @@ struct NoteCanvasView: View {
 
     private func withObject(_ id: NSManagedObjectID, _ mutate: (CanvasObject) -> Void) {
         guard let object = (try? context.existingObject(with: id)) as? CanvasObject else { return }
+        onActivate()  // オブジェクトを操作した側をアクティブにする
         mutate(object)
         if !object.isDeleted {
             object.updatedAt = .now

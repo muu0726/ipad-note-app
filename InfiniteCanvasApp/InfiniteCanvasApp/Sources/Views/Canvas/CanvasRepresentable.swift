@@ -9,22 +9,78 @@ struct CanvasViewport {
     var zoomScale: CGFloat
 }
 
-/// 通常ノート(固定ページ形式)のページ寸法。A4 相当(幅800 x 高さ1130)を縦に並べる。
+/// 通常ノート(固定ページ形式)のページ寸法。A4 相当(幅800 x 高さ1130)。
 enum PageMetrics {
     static let width: CGFloat = 800
     static let height: CGFloat = 1130
     static let gap: CGFloat = 20        // ページ間のすき間
-    static let margin: CGFloat = 24     // 上下のグレー余白(contentInset)
+    static let margin: CGFloat = 24     // スクロール方向の端のグレー余白(contentInset)
 
-    /// pageCount 枚を縦に並べたときの総高さ
+    /// pageCount 枚を縦一列に並べたときの総高さ(既定レイアウトの後方互換ヘルパー)
     static func totalHeight(pageCount: Int) -> CGFloat {
         height * CGFloat(pageCount) + gap * CGFloat(max(0, pageCount - 1))
     }
 
-    /// index ページ目の矩形(コンテンツ座標)
+    /// index ページ目の矩形(縦一列・既定レイアウト。PDF 背景生成などが使う)
     static func pageRect(_ index: Int) -> CGRect {
         CGRect(x: 0, y: CGFloat(index) * (height + gap), width: width, height: height)
     }
+}
+
+/// 通常ノートのページ配置を「見開き(1/2ページ)× スクロール方向(縦/横)」の4通りで
+/// 計算する電卓。各ページの矩形とコンテンツ全体サイズを求める。
+/// UIKit 非依存の純ロジックなのでユニットテストで担保する。
+///
+/// - 縦スクロール・1ページ: 縦一列(X=0固定、Y方向へ展開)
+/// - 縦スクロール・2ページ: 横に2枚並べ、下へ段送り(2列グリッド)
+/// - 横スクロール・1ページ: 横一列(Y=0固定、X方向へ展開)
+/// - 横スクロール・2ページ: 見開き(左右を隙間なく密着)を1ユニットとし、右へユニットを増やす
+struct PagedLayoutCalculator: Equatable {
+    let pageCount: Int
+    let isTwoPageLayout: Bool
+    let isHorizontalScroll: Bool
+
+    private var count: Int { max(1, pageCount) }
+
+    /// index ページ目の矩形(コンテンツ座標)
+    func pageRect(_ index: Int) -> CGRect {
+        let w = PageMetrics.width, h = PageMetrics.height, gap = PageMetrics.gap
+        let x: CGFloat
+        let y: CGFloat
+        if isHorizontalScroll {
+            if isTwoPageLayout {
+                // 見開き: 2枚を密着させて1ユニット、ユニット間に gap
+                let unit = index / 2, side = index % 2
+                x = CGFloat(unit) * (2 * w + gap) + CGFloat(side) * w
+            } else {
+                x = CGFloat(index) * (w + gap)
+            }
+            y = 0
+        } else {
+            if isTwoPageLayout {
+                x = CGFloat(index % 2) * (w + gap)
+                y = CGFloat(index / 2) * (h + gap)
+            } else {
+                x = 0
+                y = CGFloat(index) * (h + gap)
+            }
+        }
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// 全ページ矩形の外接サイズ(= キャンバスのコンテンツサイズ)
+    var contentSize: CGSize {
+        var maxX: CGFloat = 0, maxY: CGFloat = 0
+        for index in 0..<count {
+            let rect = pageRect(index)
+            maxX = max(maxX, rect.maxX)
+            maxY = max(maxY, rect.maxY)
+        }
+        return CGSize(width: maxX, height: maxY)
+    }
+
+    /// スクロール方向(true=横 / false=縦)
+    var scrollsHorizontally: Bool { isHorizontalScroll }
 }
 
 /// PKCanvasView を「巨大キャンバス + ズーム」として構成する UIViewRepresentable。
@@ -45,6 +101,10 @@ struct CanvasRepresentable: UIViewRepresentable {
     let noteType: CanvasNoteType
     /// 通常ノートのページ数
     let pageCount: Int
+    /// 通常ノート: 見開き2ページ表示か
+    let isTwoPageLayout: Bool
+    /// 通常ノート: 横スクロール(ページめくり)か
+    let isHorizontalScroll: Bool
     let objects: [CanvasObject]
     /// 挿入直後に選択(テキストなら編集開始)するオブジェクト
     let autoFocusObjectID: NSManagedObjectID?
@@ -67,27 +127,42 @@ struct CanvasRepresentable: UIViewRepresentable {
     /// Undo/Redo ブリッジなどにキャンバスを渡す
     let onCanvasReady: (PKCanvasView) -> Void
 
+    /// 通常ノートのページ配置電卓(見開き × スクロール方向)
+    private var layout: PagedLayoutCalculator {
+        PagedLayoutCalculator(
+            pageCount: pageCount,
+            isTwoPageLayout: isTwoPageLayout,
+            isHorizontalScroll: isHorizontalScroll
+        )
+    }
+
     /// ノート形式に応じたキャンバスのコンテンツサイズ
     private var contentSize: CGSize {
         switch noteType {
         case .infinite:
             return CGSize(width: Self.canvasSize, height: Self.canvasSize)
         case .paged:
-            return CGSize(width: PageMetrics.width, height: PageMetrics.totalHeight(pageCount: pageCount))
+            return layout.contentSize
         }
     }
 
-    /// コンテンツサイズ・背景レイヤーのフレーム・ページ描画を現在の形式へ合わせる。
+    /// コンテンツサイズ・背景レイヤーのフレーム・ページ描画・スクロール方向を現在の形式へ合わせる。
     /// make と update の両方から呼ぶ(冪等)。
     private func applyLayout(to container: CanvasContainerUIView) {
         let size = contentSize
-        container.canvasView.contentSize = size
+        let canvas = container.canvasView
+        canvas.contentSize = size
         container.patternView.frame = CGRect(origin: .zero, size: size)
         container.objectLayer.frame = CGRect(origin: .zero, size: size)
-        // 通常ノートは横スクロールさせない(A4幅に固定)
-        container.canvasView.alwaysBounceHorizontal = false
+
+        // スクロール方向: 横スクロール時のみ横バウンス + ページング、縦スクロール時は縦バウンス
+        let horizontal = noteType == .paged && isHorizontalScroll
+        canvas.alwaysBounceHorizontal = horizontal
+        canvas.alwaysBounceVertical = noteType != .paged || !isHorizontalScroll
+        canvas.isPagingEnabled = horizontal
+
         container.patternView.configure(
-            noteType: noteType, pageCount: pageCount,
+            noteType: noteType, layout: layout,
             style: backgroundStyle, pageColor: pageColor
         )
     }
@@ -105,6 +180,8 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)
         context.coordinator.lastPageCount = pageCount
+        context.coordinator.lastIsTwoPage = isTwoPageLayout
+        context.coordinator.lastIsHorizontal = isHorizontalScroll
         context.coordinator.attach(to: container)
         onCanvasReady(canvas)
 
@@ -134,14 +211,16 @@ struct CanvasRepresentable: UIViewRepresentable {
             if let viewport = initialViewport {
                 canvas.zoomScale = viewport.zoomScale
                 if noteType == .paged {
-                    // 画面幅の変化(回転/Split View)に耐えるため、横位置は中央寄せに任せ、
-                    // 復元するのはズームと縦スクロール位置のみ(x は読み込まない)
-                    canvas.contentOffset = CGPoint(x: 0, y: viewport.contentOffset.y)
+                    // 画面サイズの変化(回転/Split View)に耐えるため、横断方向(センタリング側)は
+                    // 中央寄せに任せ、復元するのはズームとスクロール方向の位置のみ。
+                    canvas.contentOffset = isHorizontalScroll
+                        ? CGPoint(x: viewport.contentOffset.x, y: 0)
+                        : CGPoint(x: 0, y: viewport.contentOffset.y)
                 } else {
                     canvas.contentOffset = viewport.contentOffset
                 }
             } else if noteType == .paged {
-                fitPagedWidth(canvas)  // A4幅を画面幅にフィット + 先頭ページ上端
+                fitPaged(canvas)  // ページを画面にフィット + 先頭ページへ
             } else {
                 let size = Self.canvasSize
                 canvas.contentOffset = CGPoint(
@@ -162,25 +241,46 @@ struct CanvasRepresentable: UIViewRepresentable {
         noteType == .paged ? .systemGray5 : pageColor.backgroundUIColor
     }
 
-    /// A4 幅(800pt)が画面幅に収まるようズームフィットし、先頭ページ上端へ合わせる
-    private func fitPagedWidth(_ canvas: PKCanvasView) {
-        guard canvas.bounds.width > 0 else { return }
-        let fit = min(
-            canvas.maximumZoomScale,
-            max(canvas.minimumZoomScale, canvas.bounds.width * 0.94 / PageMetrics.width)
-        )
-        canvas.zoomScale = fit
-        canvas.contentOffset = CGPoint(x: 0, y: -PageMetrics.margin)
+    /// ページを画面に収まるようズームフィットし、先頭ページへ寄せる。
+    /// 縦スクロール: 横断=幅をフィット。横スクロール: 横断=高さ(1ページ分)をフィット。
+    private func fitPaged(_ canvas: PKCanvasView) {
+        let bounds = canvas.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let size = contentSize
+        if isHorizontalScroll {
+            let fit = min(canvas.maximumZoomScale,
+                          max(canvas.minimumZoomScale, bounds.height * 0.94 / size.height))
+            canvas.zoomScale = fit
+            canvas.contentOffset = CGPoint(x: -PageMetrics.margin, y: canvas.contentOffset.y)
+        } else {
+            let fit = min(canvas.maximumZoomScale,
+                          max(canvas.minimumZoomScale, bounds.width * 0.94 / size.width))
+            canvas.zoomScale = fit
+            canvas.contentOffset = CGPoint(x: canvas.contentOffset.x, y: -PageMetrics.margin)
+        }
     }
 
-    /// 通常ノートを横方向に中央寄せ(グレー余白を左右に出す)
+    /// 通常ノートを横断方向へ中央寄せ(スクロール方向と直交する側にグレー余白を出す)。
+    /// 縦スクロール: 左右を中央寄せ。横スクロール: 上下を中央寄せ。
     private func centerPagedContent(_ canvas: PKCanvasView) {
-        let contentW = PageMetrics.width * canvas.zoomScale
-        let sideInset = max(0, (canvas.bounds.width - contentW) / 2)
-        canvas.contentInset = UIEdgeInsets(
-            top: PageMetrics.margin, left: sideInset,
-            bottom: PageMetrics.margin, right: sideInset
-        )
+        pagedContentInset(for: canvas).map { canvas.contentInset = $0 }
+    }
+
+    /// 現在のズームでの通常ノート用 contentInset(横断方向センタリング + 端の余白)
+    private func pagedContentInset(for canvas: UIScrollView) -> UIEdgeInsets? {
+        guard noteType == .paged else { return nil }
+        let size = contentSize
+        if isHorizontalScroll {
+            let contentH = size.height * canvas.zoomScale
+            let vInset = max(0, (canvas.bounds.height - contentH) / 2)
+            return UIEdgeInsets(top: vInset, left: PageMetrics.margin,
+                                bottom: vInset, right: PageMetrics.margin)
+        } else {
+            let contentW = size.width * canvas.zoomScale
+            let hInset = max(0, (canvas.bounds.width - contentW) / 2)
+            return UIEdgeInsets(top: PageMetrics.margin, left: hInset,
+                                bottom: PageMetrics.margin, right: hInset)
+        }
     }
 
     func updateUIView(_ container: CanvasContainerUIView, context: Context) {
@@ -191,13 +291,29 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.isSelectMode = isSelectMode
         container.objectLayer.backgroundStyle = backgroundStyle
         container.objectLayer.pageColor = pageColor
-        applyLayout(to: container)  // 背景スタイル・用紙色・ページ数の変化を反映
+        applyLayout(to: container)  // 背景スタイル・用紙色・ページ数・レイアウトの変化を反映
 
-        // ページが増えたら、新しいページ(最下段)へ滑らかにスクロール
-        if noteType == .paged, pageCount > context.coordinator.lastPageCount {
-            let targetY = PageMetrics.pageRect(pageCount - 1).minY * canvas.zoomScale - PageMetrics.margin
+        // レイアウト設定(見開き / スクロール方向)が変わったら、安全に再フィット + 再センタリング。
+        // ページ数の変化は含めない(それはページ追加スクロールで扱う)。
+        // ズームや位置を作り直すのはこの変化時のみ(毎フレームやると操作を奪って無限ループの元)。
+        let layoutModeChanged = isTwoPageLayout != context.coordinator.lastIsTwoPage
+            || isHorizontalScroll != context.coordinator.lastIsHorizontal
+        if noteType == .paged, layoutModeChanged {
+            context.coordinator.lastIsTwoPage = isTwoPageLayout
+            context.coordinator.lastIsHorizontal = isHorizontalScroll
+            DispatchQueue.main.async {
+                fitPaged(canvas)
+                centerPagedContent(canvas)
+                container.patternView.applyZoom(canvas.zoomScale)
+            }
+        } else if noteType == .paged, pageCount > context.coordinator.lastPageCount {
+            // ページが増えたら、新しいページへスクロール方向に沿って滑らかに移動
             centerPagedContent(canvas)
-            canvas.setContentOffset(CGPoint(x: canvas.contentOffset.x, y: targetY), animated: true)
+            let lastRect = layout.pageRect(pageCount - 1)
+            let target: CGPoint = isHorizontalScroll
+                ? CGPoint(x: lastRect.minX * canvas.zoomScale - PageMetrics.margin, y: canvas.contentOffset.y)
+                : CGPoint(x: canvas.contentOffset.x, y: lastRect.minY * canvas.zoomScale - PageMetrics.margin)
+            canvas.setContentOffset(target, animated: true)
         }
         context.coordinator.lastPageCount = pageCount
 
@@ -220,6 +336,10 @@ struct CanvasRepresentable: UIViewRepresentable {
         var lastStrokeCount = 0
         /// 直近のページ数。増えたらページ追加とみなしてスクロールする(通常ノート)
         var lastPageCount = 1
+        /// 直近のレイアウト設定(見開き/スクロール方向)。変化時のみフィット/センタリングし直す。
+        /// ページ数はここに含めない(ページ追加はスクロール処理側で扱う)
+        var lastIsTwoPage = false
+        var lastIsHorizontal = false
         /// 図形置換で drawing を差し替える間の再入を無視するフラグ(無限再描画ループ防止)
         private var isReplacingShape = false
         /// 投げ縄でのインク移動・削除を差分検知するための直前の描画
@@ -254,14 +374,10 @@ struct CanvasRepresentable: UIViewRepresentable {
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             container?.objectLayer.applyZoom(scrollView.zoomScale)
             container?.patternView.applyZoom(scrollView.zoomScale)
-            // 通常ノートはズームしても A4 を中央に保つ(左右のグレー余白を調整)
-            if parent.noteType == .paged, let canvas = container?.canvasView {
-                let contentW = PageMetrics.width * scrollView.zoomScale
-                let sideInset = max(0, (scrollView.bounds.width - contentW) / 2)
-                canvas.contentInset = UIEdgeInsets(
-                    top: PageMetrics.margin, left: sideInset,
-                    bottom: PageMetrics.margin, right: sideInset
-                )
+            // 通常ノートはズームしてもページを横断方向の中央に保つ(グレー余白を調整)
+            if parent.noteType == .paged, let canvas = container?.canvasView,
+               let inset = parent.pagedContentInset(for: canvas) {
+                canvas.contentInset = inset
             }
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
@@ -495,7 +611,7 @@ final class BackgroundPatternUIView: UIView {
         didSet { if pageColor != oldValue, !isConfiguring { rebuild() } }
     }
     private var noteType: CanvasNoteType = .infinite
-    private var pageCount: Int = 1
+    private var pagedLayout = PagedLayoutCalculator(pageCount: 1, isTwoPageLayout: false, isHorizontalScroll: false)
     /// configure() 中は didSet の逐次 rebuild を抑止し、最後に一度だけ再構築する
     private var isConfiguring = false
     /// タイルのレンダリング解像度。ズームインで拡大されても線がボケないよう倍率を上げる
@@ -513,14 +629,14 @@ final class BackgroundPatternUIView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    /// ノート形式・ページ数・スタイル・用紙色をまとめて反映(変化時のみ再構築)。
-    func configure(noteType: CanvasNoteType, pageCount: Int, style: CanvasBackgroundStyle, pageColor: CanvasPageColor) {
-        let changed = noteType != self.noteType || pageCount != self.pageCount
+    /// ノート形式・ページ配置・スタイル・用紙色をまとめて反映(変化時のみ再構築)。
+    func configure(noteType: CanvasNoteType, layout: PagedLayoutCalculator, style: CanvasBackgroundStyle, pageColor: CanvasPageColor) {
+        let changed = noteType != self.noteType || layout != self.pagedLayout
             || style != self.style || pageColor != self.pageColor
         guard changed else { return }
         isConfiguring = true
         self.noteType = noteType
-        self.pageCount = pageCount
+        self.pagedLayout = layout
         self.style = style
         self.pageColor = pageColor
         isConfiguring = false
@@ -558,14 +674,18 @@ final class BackgroundPatternUIView: UIView {
             ? pageColor.backgroundUIColor
             : UIColor(patternImage: makeTile())
 
-        for index in 0..<max(1, pageCount) {
-            let page = UIView(frame: PageMetrics.pageRect(index))
+        // 横スクロールは影を横方向へ、縦スクロールは下方向へ落として奥行きを出す
+        let shadowOffset = pagedLayout.scrollsHorizontally
+            ? CGSize(width: 2, height: 0) : CGSize(width: 0, height: 2)
+
+        for index in 0..<max(1, pagedLayout.pageCount) {
+            let page = UIView(frame: pagedLayout.pageRect(index))
             page.backgroundColor = pageBackground
             // 用紙らしい影と薄い境界線
             page.layer.shadowColor = UIColor.black.cgColor
             page.layer.shadowOpacity = 0.18
             page.layer.shadowRadius = 6
-            page.layer.shadowOffset = CGSize(width: 0, height: 2)
+            page.layer.shadowOffset = shadowOffset
             page.layer.shadowPath = UIBezierPath(rect: page.bounds).cgPath
             page.layer.borderColor = UIColor.black.withAlphaComponent(0.08).cgColor
             page.layer.borderWidth = 0.5
