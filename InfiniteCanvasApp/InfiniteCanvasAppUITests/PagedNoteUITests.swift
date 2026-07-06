@@ -30,7 +30,7 @@ final class PagedNoteUITests: XCTestCase {
         }
 
         // 「通常ノート」を選択して作成
-        let pagedSegment = app.segmentedControls.buttons["通常ノート"]
+        let pagedSegment = segment(app, id: "note-type-paged")
         XCTAssertTrue(pagedSegment.waitForExistence(timeout: 5), "ノート種類の選択が出ない")
         pagedSegment.tap()
         app.buttons["作成"].tap()
@@ -110,11 +110,19 @@ final class PagedNoteUITests: XCTestCase {
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }
-        let pagedSegment = app.segmentedControls.buttons["通常ノート"]
+        let pagedSegment = segment(app, id: "note-type-paged")
         _ = pagedSegment.waitForExistence(timeout: 5)
         pagedSegment.tap()
         app.buttons["作成"].tap()
         _ = backToLibrary.waitForExistence(timeout: 5)
+    }
+
+    /// セグメントピッカーの各セグメント(付与した accessibilityIdentifier で引く)。
+    /// segmented Picker の各要素は buttons として公開されないことがあるため
+    /// 種別を問わず identifier でマッチする。
+    @MainActor
+    private func segment(_ app: XCUIApplication, id: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: id).firstMatch
     }
 
     @MainActor

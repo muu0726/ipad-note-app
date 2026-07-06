@@ -122,7 +122,9 @@ private struct NoteCreateSheet: View {
                 Section("ノートの種類") {
                     Picker("ノートの種類", selection: $noteType) {
                         ForEach(CanvasNoteType.allCases, id: \.self) { type in
-                            Text(type.label).tag(type)
+                            Text(type.label)
+                                .tag(type)
+                                .accessibilityIdentifier("note-type-\(type.rawValue)")
                         }
                     }
                     .pickerStyle(.segmented)

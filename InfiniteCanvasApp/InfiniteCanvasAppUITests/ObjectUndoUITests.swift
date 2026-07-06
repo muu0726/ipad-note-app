@@ -73,6 +73,8 @@ final class ObjectUndoUITests: XCTestCase {
              timeout: 5, fulfill: moved)
         waitForExpectations(timeout: 5)
 
+        // 移動がアンドゥスタックへ登録される(0.8秒デバウンス)のを待ってから Undo
+        settle(1.0)
         undoButton.tap()
         let movedBack = expectation(description: "Undo で元の位置へ戻った")
         wait(until: {
@@ -155,6 +157,14 @@ final class ObjectUndoUITests: XCTestCase {
     }
 
     // MARK: - ヘルパー
+
+    /// 一定時間だけ画面更新を待つ(自動保存デバウンス・アンドゥ登録の確定待ち)。
+    /// テストケースに登録されない独立した expectation を使う
+    /// (self.expectation(...) は後続の waitForExpectations が再度待とうとして例外になる)。
+    @MainActor
+    private func settle(_ seconds: TimeInterval) {
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "settle")], timeout: seconds)
+    }
 
     /// 検証証跡としてスクリーンショットを残す(成功時も保持)
     @MainActor

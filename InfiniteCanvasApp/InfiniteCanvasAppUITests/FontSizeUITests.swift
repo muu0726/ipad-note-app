@@ -35,25 +35,30 @@ final class FontSizeUITests: XCTestCase {
         // 3回大きくする → 24 + 2*3 = 30
         let increase = app.buttons["toolbar-font-increase"]
         for _ in 0..<3 { increase.tap() }
-        XCTAssertTrue(waitForLabel(sizeLabel, equals: "30", timeout: 3),
+        XCTAssertTrue(waitForLabel(sizeLabel, equals: "30", timeout: 5),
                       "増加後のフォントサイズが30でない(実際: \(sizeLabel.label))")
+
+        // 自動保存(0.8秒デバウンス)とアンドゥ登録が確定するのを待ってから Undo する
+        settle(1.0)
 
         // Undo で1段階戻る(28)
         app.buttons["toolbar-undo"].tap()
-        XCTAssertTrue(waitForLabel(sizeLabel, equals: "28", timeout: 3),
+        XCTAssertTrue(waitForLabel(sizeLabel, equals: "28", timeout: 5),
                       "Undo でフォントサイズが戻らない(実際: \(sizeLabel.label))")
 
         // 上限(72)でクランプ。大きいフォントでは折り返して高さが増える
         for _ in 0..<30 { increase.tap() }
-        XCTAssertTrue(waitForLabel(sizeLabel, equals: "72", timeout: 3),
+        XCTAssertTrue(waitForLabel(sizeLabel, equals: "72", timeout: 5),
                       "上限72でクランプされない(実際: \(sizeLabel.label))")
+        settle(0.5)
         let heightLarge = marker.frame.height
 
         // 下限(12)でクランプ。小さいフォントでは高さが小さくなる
         let decrease = app.buttons["toolbar-font-decrease"]
         for _ in 0..<40 { decrease.tap() }
-        XCTAssertTrue(waitForLabel(sizeLabel, equals: "12", timeout: 3),
+        XCTAssertTrue(waitForLabel(sizeLabel, equals: "12", timeout: 5),
                       "下限12でクランプされない(実際: \(sizeLabel.label))")
+        settle(0.5)
         let heightSmall = marker.frame.height
 
         XCTAssertGreaterThan(heightLarge, heightSmall + 20,
@@ -61,6 +66,13 @@ final class FontSizeUITests: XCTestCase {
     }
 
     // MARK: - ヘルパー
+
+    /// 一定時間だけ画面更新を待つ(自動保存デバウンス・アンドゥ登録の確定待ち)。
+    /// テストケースに登録されない独立した expectation を使う。
+    @MainActor
+    private func settle(_ seconds: TimeInterval) {
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "settle")], timeout: seconds)
+    }
 
     @MainActor
     private func waitForLabel(_ element: XCUIElement, equals value: String, timeout: TimeInterval) -> Bool {
