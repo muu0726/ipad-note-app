@@ -46,6 +46,9 @@ struct SidebarView: View {
                 }
             }
             Section {
+                Label("グラフビュー", systemImage: "point.3.connected.trianglepath.dotted")
+                    .tag(SidebarSelection.graph)
+                    .accessibilityIdentifier("sidebar-graph")
                 Label("ゴミ箱", systemImage: "trash")
                     .tag(SidebarSelection.trash)
             }

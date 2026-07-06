@@ -4,6 +4,7 @@ import CoreData
 /// サイドバーで選択できる対象
 enum SidebarSelection: Hashable {
     case allNotes
+    case graph
     case trash
     case folder(Folder)
 }
@@ -30,6 +31,10 @@ struct RootView: View {
             // バックグラウンド移行・終了直前に、保留中のスクロール位置を確定保存
             if phase != .active { session.flushViewports() }
         }
+        .onChange(of: selection) { _, newValue in
+            // グラフビューを選んだらキャンバスを畳んでグラフを前面に出す
+            if newValue == .graph { session.showLibrary() }
+        }
     }
 
     @ViewBuilder
@@ -38,6 +43,8 @@ struct RootView: View {
             CanvasTabsView()
         } else {
             switch selection {
+            case .graph:
+                GraphView()
             case .trash:
                 TrashView()
             case .folder(let folder):
