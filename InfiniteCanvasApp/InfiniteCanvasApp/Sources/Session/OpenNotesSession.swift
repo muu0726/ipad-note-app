@@ -1,6 +1,10 @@
 import Foundation
 import Combine
 import CoreData
+import CoreGraphics
+
+/// アプリ内スプリットビューの左右
+enum SplitSide { case left, right }
 
 /// 開いているノート(タブ)の状態を管理するセッションオブジェクト。
 /// タブの並び・選択中タブ・キャンバス表示状態を保持し、UserDefaults に永続化する。
@@ -13,6 +17,19 @@ final class OpenNotesSession: ObservableObject {
     @Published var isCanvasVisible = false {
         didSet { persistState() }
     }
+
+    // MARK: - アプリ内スプリットビュー(2画面分割)
+
+    /// 分割表示が有効か
+    @Published var isSplitActive = false
+    /// 左側でアクティブなノート
+    @Published var leftNoteID: NSManagedObjectID?
+    /// 右側でアクティブなノート
+    @Published var rightNoteID: NSManagedObjectID?
+    /// 分割比率(左の占有幅。0.2〜0.8 にクランプ)
+    @Published var splitDividerRatio: CGFloat = 0.5
+    /// ツールバー(Undo/Redo・挿入)が作用する側
+    @Published var activeSide: SplitSide = .left
     /// タブごとのビューポート(スクロール位置・ズーム)。
     /// 描画のたびに更新されるため @Published にはしない(再描画ループ防止)
     var viewports: [NSManagedObjectID: CanvasViewport] = [:]
@@ -39,10 +56,14 @@ final class OpenNotesSession: ObservableObject {
 
     // MARK: - タブ操作
 
-    /// ノートをタブで開く。既に開いていればそのタブへ切り替える(重複タブは作らない)
+    /// ノートをタブで開く。既に開いていればそのタブへ切り替える(重複タブは作らない)。
+    /// 分割中はアクティブ側のノートを差し替える。
     func open(_ note: NoteFile) {
         if !openNotes.contains(note) {
             openNotes.append(note)
+        }
+        if isSplitActive {
+            assignActiveSide(note)
         }
         selectedNote = note
         isCanvasVisible = true
@@ -52,7 +73,14 @@ final class OpenNotesSession: ObservableObject {
     func close(_ note: NoteFile) {
         guard let index = openNotes.firstIndex(of: note) else { return }
         openNotes.remove(at: index)
-        if selectedNote == note {
+
+        // 分割中に片側のノートを閉じたら、もう片方の全画面表示へ畳む
+        if isSplitActive, note.objectID == leftNoteID || note.objectID == rightNoteID {
+            let survivingID = note.objectID == leftNoteID ? rightNoteID : leftNoteID
+            let surviving = survivingID.flatMap { id in openNotes.first { $0.objectID == id } }
+            deactivateSplit()
+            selectedNote = surviving ?? openNotes.last
+        } else if selectedNote == note {
             // 閉じたタブの右隣(なければ末尾)を選択
             selectedNote = openNotes.indices.contains(index) ? openNotes[index] : openNotes.last
         }
@@ -64,9 +92,77 @@ final class OpenNotesSession: ObservableObject {
 
     /// ゴミ箱行き・削除されたノートのタブを閉じる
     func closeTrashedNotes() {
+        // 分割中の左右がゴミ箱行きなら先に分割を畳む(ダングリング防止)
+        if isSplitActive {
+            let deadSide = openNotes.contains { ($0.isTrashed || $0.isDeleted)
+                && ($0.objectID == leftNoteID || $0.objectID == rightNoteID) }
+            if deadSide {
+                let keep = openNotes.first {
+                    !($0.isTrashed || $0.isDeleted)
+                    && ($0.objectID == leftNoteID || $0.objectID == rightNoteID)
+                }
+                deactivateSplit()
+                if let keep { selectedNote = keep }
+            }
+        }
         for note in openNotes.filter({ $0.isTrashed || $0.isDeleted }) {
             close(note)
         }
+    }
+
+    // MARK: - スプリットビュー制御
+
+    /// note を右側に配置して2画面分割を開始する(現在の選択ノートが左側になる)。
+    /// 左に据える相手がいない/同一ノートのときは通常オープンにフォールバックする。
+    func openRight(_ note: NoteFile) {
+        guard let current = selectedNote, current != note else {
+            open(note)
+            return
+        }
+        if !openNotes.contains(note) { openNotes.append(note) }
+        leftNoteID = current.objectID
+        rightNoteID = note.objectID
+        isSplitActive = true
+        activeSide = .right
+        selectedNote = note
+        isCanvasVisible = true
+        persistState()
+    }
+
+    /// 分割を解除して1画面へ戻す。keep 指定があればそのノートを、無ければアクティブ側を残す。
+    func closeSplit(keeping keep: NoteFile? = nil) {
+        guard isSplitActive else { return }
+        let keepID = keep?.objectID ?? (activeSide == .left ? leftNoteID : rightNoteID)
+        deactivateSplit()
+        if let keepID, let note = openNotes.first(where: { $0.objectID == keepID }) {
+            selectedNote = note
+        }
+        persistState()
+    }
+
+    /// 分割中に、指定側をアクティブにしてナビゲーション対象も合わせる。
+    /// 既にアクティブなら何もしない(描画のたびの selectedNote 再代入=永続化を防ぐ)。
+    func activateSide(_ side: SplitSide) {
+        guard isSplitActive, activeSide != side else { return }
+        activeSide = side
+        let id = side == .left ? leftNoteID : rightNoteID
+        if let id, let note = openNotes.first(where: { $0.objectID == id }) {
+            selectedNote = note
+        }
+    }
+
+    /// 分割状態をクリアする(内部用)
+    private func deactivateSplit() {
+        isSplitActive = false
+        leftNoteID = nil
+        rightNoteID = nil
+        activeSide = .left
+    }
+
+    /// アクティブ側のノートIDを差し替える(内部用)
+    private func assignActiveSide(_ note: NoteFile) {
+        if activeSide == .left { leftNoteID = note.objectID }
+        else { rightNoteID = note.objectID }
     }
 
     /// タブを維持したままライブラリへ戻る

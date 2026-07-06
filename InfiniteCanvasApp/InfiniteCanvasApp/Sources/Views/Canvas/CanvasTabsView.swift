@@ -11,6 +11,11 @@ struct CanvasTabsView: View {
     @Environment(\.managedObjectContext) private var context
     @StateObject private var toolState = PenToolState()
     @StateObject private var undoBridge = CanvasUndoBridge()
+    // 分割時は左右それぞれ独立した Undo 履歴を持つ(互いに干渉しない)
+    @StateObject private var leftUndoBridge = CanvasUndoBridge()
+    @StateObject private var rightUndoBridge = CanvasUndoBridge()
+    @State private var leftInsertion: ObjectInsertion?
+    @State private var rightInsertion: ObjectInsertion?
     @State private var isToolbarCollapsed = false
 
     // オブジェクト挿入(要件③): ピッカーで読み込んだデータをキャンバスへ渡す
@@ -28,9 +33,9 @@ struct CanvasTabsView: View {
         VStack(spacing: 0) {
             PenToolbarView(
                 toolState: toolState,
-                undoBridge: undoBridge,
+                undoBridge: activeUndoBridge,
                 isCollapsed: $isToolbarCollapsed,
-                onInsertText: { pendingInsertion = .text },
+                onInsertText: { setActiveInsertion(.text) },
                 onInsertImage: { isPhotoPickerPresented = true },
                 onInsertPDF: { isPDFImporterPresented = true },
                 onInsertNoteLink: { showNoteLinkPicker = true },
@@ -51,7 +56,7 @@ struct CanvasTabsView: View {
             guard let item else { return }
             Task {
                 if let data = try? await item.loadTransferable(type: Data.self) {
-                    pendingInsertion = .image(data)
+                    setActiveInsertion(.image(data))
                 }
                 photoSelection = nil
             }
@@ -71,13 +76,13 @@ struct CanvasTabsView: View {
         }
         .sheet(isPresented: $showNoteLinkPicker) {
             NoteLinkPickerView(excludingNoteID: session.selectedNote?.objectID) { selected in
-                if let uuid = selected.id { pendingInsertion = .noteLink(uuid) }
+                if let uuid = selected.id { setActiveInsertion(.noteLink(uuid)) }
                 showNoteLinkPicker = false
             }
         }
         .confirmationDialog("PDF の取り込み方法", isPresented: $showPDFImportChoice, titleVisibility: .visible) {
             Button("オブジェクトとして挿入") {
-                if let data = pendingPDFData { pendingInsertion = .pdf(data) }
+                if let data = pendingPDFData { setActiveInsertion(.pdf(data)) }
                 pendingPDFData = nil
             }
             Button("新規ノートとして背景インポート") {
@@ -104,7 +109,11 @@ struct CanvasTabsView: View {
 
     @ViewBuilder
     private var canvasArea: some View {
-        if let note = session.selectedNote {
+        if session.isSplitActive,
+           let left = resolveNote(session.leftNoteID),
+           let right = resolveNote(session.rightNoteID) {
+            splitCanvas(left: left, right: right)
+        } else if let note = session.selectedNote {
             NoteCanvasView(
                 note: note,
                 toolState: toolState,
@@ -114,6 +123,87 @@ struct CanvasTabsView: View {
                 // タブ切替時はビューを作り直す(ビューポートは session から復元される)
                 .id(note.objectID)
         }
+    }
+
+    // MARK: - アプリ内スプリットビュー(2画面分割)
+
+    /// 左右2つの NoteCanvasView をドラッグ可能な間仕切りで並べる。
+    /// 左右は別々の NoteFile・Undo 履歴・挿入先を持ち、独立して編集できる。
+    private func splitCanvas(left: NoteFile, right: NoteFile) -> some View {
+        GeometryReader { geo in
+            let handleWidth: CGFloat = 12
+            let available = max(0, geo.size.width - handleWidth)
+            let leftWidth = available * session.splitDividerRatio
+            HStack(spacing: 0) {
+                splitPane(note: left, side: .left,
+                          bridge: leftUndoBridge, insertion: $leftInsertion)
+                    .frame(width: leftWidth)
+                SplitDividerHandle(
+                    ratio: $session.splitDividerRatio,
+                    totalWidth: geo.size.width,
+                    handleWidth: handleWidth
+                )
+                splitPane(note: right, side: .right,
+                          bridge: rightUndoBridge, insertion: $rightInsertion)
+                    .frame(width: max(0, available - leftWidth))
+            }
+        }
+    }
+
+    /// 分割の片側。アクティブ側は上端にアクセントバーを出し、タップでアクティブ切替。
+    private func splitPane(
+        note: NoteFile, side: SplitSide,
+        bridge: CanvasUndoBridge, insertion: Binding<ObjectInsertion?>
+    ) -> some View {
+        let isActive = session.activeSide == side
+        return NoteCanvasView(
+            note: note,
+            toolState: toolState,
+            undoBridge: bridge,
+            insertion: insertion,
+            onActivate: { activate(side) }
+        )
+        .id(note.objectID)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.accentColor)
+                .frame(height: 3)
+                .opacity(isActive ? 1 : 0)
+                .allowsHitTesting(false)
+        }
+        .contentShape(Rectangle())
+        // タップした側をアクティブに(描画・オブジェクト編集は onActivate 側で拾う)
+        .simultaneousGesture(TapGesture().onEnded { activate(side) })
+        .accessibilityIdentifier(side == .left ? "split-pane-left" : "split-pane-right")
+    }
+
+    /// 指定側をアクティブにする(選択テキスト情報は持ち越さない)。
+    private func activate(_ side: SplitSide) {
+        guard session.isSplitActive else { return }
+        if session.activeSide != side {
+            toolState.selectedTextObject = nil
+        }
+        session.activateSide(side)
+    }
+
+    /// ツールバーが作用する Undo 履歴(分割時はアクティブ側)
+    private var activeUndoBridge: CanvasUndoBridge {
+        guard session.isSplitActive else { return undoBridge }
+        return session.activeSide == .left ? leftUndoBridge : rightUndoBridge
+    }
+
+    /// オブジェクト挿入をアクティブ側のキャンバスへ振り分ける
+    private func setActiveInsertion(_ insertion: ObjectInsertion?) {
+        guard session.isSplitActive else { pendingInsertion = insertion; return }
+        if session.activeSide == .left { leftInsertion = insertion }
+        else { rightInsertion = insertion }
+    }
+
+    /// objectID から開いているノートを引く(分割の左右ノート解決に使う)
+    private func resolveNote(_ id: NSManagedObjectID?) -> NoteFile? {
+        guard let id else { return nil }
+        if let note = session.openNotes.first(where: { $0.objectID == id }) { return note }
+        return (try? context.existingObject(with: id)) as? NoteFile
     }
 
     // MARK: - 背景テンプレート切替(要件④)
@@ -169,9 +259,10 @@ struct CanvasTabsView: View {
                           PenToolState.fontSizeRange.upperBound)
         guard abs(clamped - object.fontSize) > 0.01 else { return }
 
+        let bridge = activeUndoBridge
         CanvasObjectUndo.registerFontSizeChange(
             objectUUID: uuid, previousFontSize: object.fontSize,
-            in: undoBridge.activeUndoManager, context: context, bridge: undoBridge
+            in: bridge.activeUndoManager, context: context, bridge: bridge
         )
         object.fontSize = clamped
         object.updatedAt = .now
@@ -195,8 +286,11 @@ struct NoteTabBar: View {
                         NoteTabChip(
                             note: note,
                             isSelected: note == session.selectedNote,
-                            onSelect: { session.selectedNote = note },
-                            onClose: { session.close(note) }
+                            isSplitActive: session.isSplitActive,
+                            onSelect: { session.open(note) },
+                            onClose: { session.close(note) },
+                            onOpenRight: { session.openRight(note) },
+                            onCloseSplit: { session.closeSplit(keeping: note) }
                         )
                     }
                 }
@@ -261,8 +355,11 @@ struct NoteLinkPickerView: View {
 private struct NoteTabChip: View {
     @ObservedObject var note: NoteFile
     let isSelected: Bool
+    let isSplitActive: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onOpenRight: () -> Void
+    let onCloseSplit: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -287,8 +384,56 @@ private struct NoteTabChip: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
+        .accessibilityIdentifier("note-tab-\(note.displayTitle)")
         .contextMenu {
+            Button {
+                onOpenRight()
+            } label: {
+                Label("右側で開く", systemImage: "rectangle.righthalf.inset.filled")
+            }
+            if isSplitActive {
+                Button {
+                    onCloseSplit()
+                } label: {
+                    Label("分割を解除", systemImage: "rectangle")
+                }
+            }
+            Divider()
             Button("このタブを閉じる", action: onClose)
         }
+    }
+}
+
+/// 分割の間仕切り。左右ドラッグで比率を 0.2〜0.8 に変える。
+private struct SplitDividerHandle: View {
+    @Binding var ratio: CGFloat
+    let totalWidth: CGFloat
+    let handleWidth: CGFloat
+    /// ドラッグ開始時点の比率(移動量の二重加算を防ぐ)
+    @State private var startRatio: CGFloat?
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color(.secondarySystemBackground))
+            Capsule()
+                .fill(Color(.separator))
+                .frame(width: 3, height: 40)
+        }
+        .frame(width: handleWidth)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    let usable = totalWidth - handleWidth
+                    guard usable > 0 else { return }
+                    let base = startRatio ?? ratio
+                    if startRatio == nil { startRatio = ratio }
+                    ratio = min(0.8, max(0.2, base + value.translation.width / usable))
+                }
+                .onEnded { _ in startRatio = nil }
+        )
+        .accessibilityIdentifier("split-divider")
     }
 }
