@@ -49,14 +49,19 @@ struct LibraryActionDialogs: ViewModifier {
     private var isCreateFolderPresented: Binding<Bool> {
         Binding(
             get: { coordinator.createRequest?.kind == .folder },
-            set: { if !$0 { coordinator.createRequest = nil } }
+            // createRequest はノート作成シートと共有している。自分(フォルダ)の提示が
+            // 閉じたときだけクリアする。kind を確認しないと、ノート作成に切り替わった
+            // 瞬間にこの set(false) がノートの createRequest まで消し、作成シートの
+            // 表示を取りこぼす競合になる。
+            set: { if !$0, coordinator.createRequest?.kind == .folder { coordinator.createRequest = nil } }
         )
     }
 
     private var noteCreateRequest: Binding<LibraryActionCoordinator.CreateRequest?> {
         Binding(
             get: { coordinator.createRequest?.kind == .note ? coordinator.createRequest : nil },
-            set: { if $0 == nil { coordinator.createRequest = nil } }
+            // 同様に、自分(ノート)の提示が閉じたときだけクリアする(フォルダ作成を巻き込まない)。
+            set: { if $0 == nil, coordinator.createRequest?.kind == .note { coordinator.createRequest = nil } }
         )
     }
 
