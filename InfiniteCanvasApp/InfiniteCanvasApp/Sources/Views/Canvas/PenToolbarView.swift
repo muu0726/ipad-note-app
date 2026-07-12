@@ -12,6 +12,7 @@ struct PenToolbarView: View {
     var onInsertImage: () -> Void = {}
     var onInsertPDF: () -> Void = {}
     var onInsertNoteLink: () -> Void = {}
+    var onInsertTodo: () -> Void = {}
     /// 選択中テキストのフォントサイズ変更(新しい絶対サイズを渡す)
     var onFontSizeChange: (CGFloat) -> Void = { _ in }
     @State private var customColor: Color = .black
@@ -294,6 +295,10 @@ struct PenToolbarView: View {
             Button(action: onInsertPDF) {
                 Label("PDF", systemImage: "doc.text")
             }
+            Button(action: onInsertTodo) {
+                Label("Todoリスト", systemImage: "checklist")
+            }
+            .accessibilityIdentifier("toolbar-insert-todo")
             Button(action: onInsertNoteLink) {
                 Label("ノートリンク", systemImage: "link")
             }

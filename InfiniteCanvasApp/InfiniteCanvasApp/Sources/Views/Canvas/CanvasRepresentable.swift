@@ -113,6 +113,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onViewportChanged: (CanvasViewport) -> Void
     let onObjectFrameChanged: (NSManagedObjectID, CGRect) -> Void
     let onObjectTextChanged: (NSManagedObjectID, String) -> Void
+    /// Todoリストの項目変更の保存(Undo あり)
+    let onObjectTodoChanged: (NSManagedObjectID, [TodoItem]) -> Void
     let onObjectDeleted: (NSManagedObjectID) -> Void
     /// フォントサイズ変更に伴う高さ自動調整の保存(Undo なし)
     let onObjectAutoHeightChanged: (NSManagedObjectID, CGFloat) -> Void
@@ -192,6 +194,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         }
         container.objectLayer.onTextChanged = { [weak coordinator] id, text in
             coordinator?.parent.onObjectTextChanged(id, text)
+        }
+        container.objectLayer.onTodoChanged = { [weak coordinator] id, items in
+            coordinator?.parent.onObjectTodoChanged(id, items)
         }
         container.objectLayer.onDelete = { [weak coordinator] id in
             coordinator?.parent.onObjectDeleted(id)
@@ -450,7 +455,7 @@ struct CanvasRepresentable: UIViewRepresentable {
                         let linked = object.resolvedLinkedNote
                         linkTitle = linked?.displayTitle ?? ""
                         image = linked?.thumbnailData.flatMap { UIImage(data: $0) }
-                    } else if object.objectKind != .text {
+                    } else if object.objectKind != .text && object.objectKind != .todo {
                         if let cached = imageCache[object.objectID] {
                             image = cached
                         } else if let rendered = object.makeDisplayImage() {
@@ -466,7 +471,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         fontSize: object.fontSize > 0 ? object.fontSize : 24,
                         image: image,
                         isLocked: object.isLocked,
-                        linkTitle: linkTitle
+                        linkTitle: linkTitle,
+                        todoItems: object.objectKind == .todo ? object.todoItems : []
                     )
                 }
             layer.sync(items: items)

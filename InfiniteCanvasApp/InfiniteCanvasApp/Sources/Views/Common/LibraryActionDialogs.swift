@@ -163,6 +163,7 @@ private struct NoteCreateSheet: View {
                         session.open(note)
                         dismiss()
                     }
+                    .accessibilityIdentifier("dialog-create-button")
                 }
             }
         }

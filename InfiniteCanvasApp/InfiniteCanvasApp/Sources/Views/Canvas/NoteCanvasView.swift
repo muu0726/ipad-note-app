@@ -9,6 +9,7 @@ enum ObjectInsertion: Equatable {
     case image(Data)
     case pdf(Data)
     case noteLink(UUID)  // 他のノートへのリンクカード
+    case todo            // チェックリスト
 }
 
 /// 1つのノートの無限キャンバス。
@@ -96,6 +97,19 @@ struct NoteCanvasView: View {
                         if previous != text, let uuid = object.id {
                             CanvasObjectUndo.registerTextChange(
                                 objectUUID: uuid, previousText: previous,
+                                in: undoBridge.activeUndoManager,
+                                context: context, bridge: undoBridge
+                            )
+                        }
+                    }
+                },
+                onObjectTodoChanged: { id, items in
+                    withObject(id) { object in
+                        let previous = object.payload
+                        object.todoItems = items
+                        if previous != object.payload, let uuid = object.id {
+                            CanvasObjectUndo.registerPayloadChange(
+                                objectUUID: uuid, previousPayload: previous,
                                 in: undoBridge.activeUndoManager,
                                 context: context, bridge: undoBridge
                             )
@@ -404,6 +418,10 @@ struct NoteCanvasView: View {
             object.kind = CanvasObjectKind.noteLink.rawValue
             object.linkedNoteUUID = linkedID.uuidString
             object.contentFrame = CGRect(x: center.x - 130, y: center.y - 40, width: 260, height: 80)
+        case .todo:
+            object.kind = CanvasObjectKind.todo.rawValue
+            object.todoItems = [TodoItem(text: "", done: false)]
+            object.contentFrame = CGRect(x: center.x - 130, y: center.y - 60, width: 260, height: 120)
         }
 
         // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる
@@ -504,6 +522,21 @@ struct NoteCanvasView: View {
                     )
                 case .image, .pdf:
                     object.makeDisplayImage()?.draw(in: object.contentFrame)
+                case .todo:
+                    // サムネイルでは項目テキストを角丸カード上に簡易描画
+                    let path = UIBezierPath(roundedRect: object.contentFrame, cornerRadius: 10)
+                    UIColor.secondarySystemBackground.setFill()
+                    path.fill()
+                    let lines = object.todoItems
+                        .map { ($0.done ? "☑ " : "☐ ") + $0.text }
+                        .joined(separator: "\n")
+                    (lines as NSString).draw(
+                        in: object.contentFrame.insetBy(dx: 10, dy: 8),
+                        withAttributes: [
+                            .font: UIFont.systemFont(ofSize: 15),
+                            .foregroundColor: pageColor.contentUIColor,
+                        ]
+                    )
                 case .noteLink:
                     // サムネイルではリンクカードを角丸の淡い矩形として簡易描画
                     let path = UIBezierPath(roundedRect: object.contentFrame, cornerRadius: 10)

@@ -39,6 +39,7 @@ struct CanvasTabsView: View {
                 onInsertImage: { isPhotoPickerPresented = true },
                 onInsertPDF: { isPDFImporterPresented = true },
                 onInsertNoteLink: { showNoteLinkPicker = true },
+                onInsertTodo: { setActiveInsertion(.todo) },
                 onFontSizeChange: changeSelectedTextFontSize
             )
             Divider()

@@ -6,6 +6,13 @@ import PDFKit
 enum CanvasObjectKind: String {
     case text, image, pdf
     case noteLink  // 他のノートへのショートカット(カード型UI)
+    case todo      // チェックリスト(タスク管理)
+}
+
+/// Todoリストの1項目。payload に [TodoItem] を JSON で保存する。
+struct TodoItem: Codable, Equatable {
+    var text: String
+    var done: Bool
 }
 
 extension CanvasObject {
@@ -22,6 +29,12 @@ extension CanvasObject {
             width = newValue.width
             height = newValue.height
         }
+    }
+
+    /// Todoリストの項目。payload に JSON で保存する(未設定は空配列)
+    var todoItems: [TodoItem] {
+        get { payload.flatMap { try? JSONDecoder().decode([TodoItem].self, from: $0) } ?? [] }
+        set { payload = try? JSONEncoder().encode(newValue) }
     }
 
     /// ノートリンクの場合、リンク先の NoteFile を UUID から引く(ゴミ箱・削除済みは nil)
@@ -54,7 +67,7 @@ extension CanvasObject {
                 of: CGSize(width: box.width * scale, height: box.height * scale),
                 for: .mediaBox
             )
-        case .text, .noteLink:
+        case .text, .noteLink, .todo:
             return nil
         }
     }

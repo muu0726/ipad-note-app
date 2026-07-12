@@ -90,6 +90,31 @@ enum CanvasObjectUndo {
         bridge?.refresh()
     }
 
+    /// payload の変更(Todoリストの項目編集など)。逆操作で payload を戻すだけ。
+    static func registerPayloadChange(
+        objectUUID: UUID,
+        previousPayload: Data?,
+        in manager: UndoManager?,
+        context: NSManagedObjectContext,
+        bridge: CanvasUndoBridge?
+    ) {
+        guard let manager else { return }
+        manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
+            MainActor.assumeIsolated {
+                guard let object = fetchObject(objectUUID, in: context) else { return }
+                let current = object.payload
+                object.payload = previousPayload
+                object.updatedAt = .now
+                saveAndRefresh(context: context, bridge: bridge)
+                registerPayloadChange(
+                    objectUUID: objectUUID, previousPayload: current,
+                    in: manager, context: context, bridge: bridge
+                )
+            }
+        }
+        bridge?.refresh()
+    }
+
     /// テキストのフォントサイズ変更(高さの自動調整はビュー側が追従して保存する)
     static func registerFontSizeChange(
         objectUUID: UUID,

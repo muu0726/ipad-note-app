@@ -11,6 +11,7 @@ struct CanvasObjectItem {
     var image: UIImage?      // image / pdf のレンダリング済み画像(noteLink ではサムネイル)
     var isLocked: Bool = false  // PDF 背景など: 移動・リサイズ・削除・選択を禁止
     var linkTitle: String = ""  // noteLink: リンク先ノートのタイトル
+    var todoItems: [TodoItem] = []  // todo: チェックリストの項目
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -21,6 +22,8 @@ final class ObjectLayerUIView: UIView {
     // Core Data への書き戻しは Coordinator 経由で行う
     var onFrameChanged: ((NSManagedObjectID, CGRect) -> Void)?
     var onTextChanged: ((NSManagedObjectID, String) -> Void)?
+    /// Todoリストの項目が変わったときの書き戻し
+    var onTodoChanged: ((NSManagedObjectID, [TodoItem]) -> Void)?
     var onDelete: ((NSManagedObjectID) -> Void)?
     /// フォントサイズ変更時の高さ自動調整を Undo 無しで保存するための書き戻し
     var onAutoHeightChanged: ((NSManagedObjectID, CGFloat) -> Void)?
@@ -169,7 +172,7 @@ final class ObjectLayerUIView: UIView {
 }
 
 /// 1つのオブジェクトを表すビュー。移動・リサイズ・長押し削除・テキスト編集のジェスチャを持つ。
-final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractionDelegate {
+final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractionDelegate, UIGestureRecognizerDelegate {
     let objectID: NSManagedObjectID
     let kind: CanvasObjectKind
     let isLocked: Bool
@@ -183,6 +186,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
     private let imageView = UIImageView()
     private let textView = UITextView()
+    private let todoListView = TodoListView()
     private let resizeHandle = UIView()
     private lazy var editMenuInteraction = UIEditMenuInteraction(delegate: self)
 
@@ -221,6 +225,20 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             addSubview(imageView)
         case .noteLink:
             setUpLinkCard()
+        case .todo:
+            todoListView.onItemsChanged = { [weak self] items in
+                guard let self else { return }
+                self.layerView?.onTodoChanged?(self.objectID, items)
+            }
+            // 行の増減でカードの高さを内容に追従させる(Undo なしで保存)
+            todoListView.onHeightChanged = { [weak self] height in
+                guard let self, !self.isInteracting else { return }
+                guard abs(height - self.contentFrame.height) > 0.5 else { return }
+                self.contentFrame.size.height = height
+                self.applyPlacement()
+                self.layerView?.onAutoHeightChanged?(self.objectID, height)
+            }
+            addSubview(todoListView)
         }
 
         // 選択チップ: リサイズハンドル(右下)。角に半分かかる配置
@@ -231,7 +249,9 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.isHidden = true
         addSubview(resizeHandle)
 
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap)))
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        tap.delegate = self  // Todo の行内コントロールへのタップは横取りしない
+        addGestureRecognizer(tap)
         let movePan = UIPanGestureRecognizer(target: self, action: #selector(handleMovePan(_:)))
         movePan.maximumNumberOfTouches = 1
         addGestureRecognizer(movePan)
@@ -290,6 +310,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         super.layoutSubviews()
         imageView.frame = bounds
         textView.frame = bounds
+        todoListView.frame = bounds
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
 
         if kind == .noteLink {
@@ -337,6 +358,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if kind == .text, !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
+        // 編集中はビュー側が真値なので上書きしない(テキストと同様のガード)
+        if kind == .todo, !todoListView.isEditing {
+            todoListView.setItems(item.todoItems)
+        }
         if kind == .noteLink {
             linkTitleLabel.text = item.linkTitle.isEmpty ? "(削除されたノート)" : item.linkTitle
             linkThumb.image = item.image
@@ -383,24 +408,48 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if !selected { endTextEditing() }
     }
 
+    // Todo の行内コントロール(チェックボックス/テキスト欄)へのタップは、
+    // 親のタップ(=再選択・編集開始)に横取りさせずコントロールへ渡す。
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard kind == .todo else { return true }
+        var view = touch.view
+        while let current = view, current !== self {
+            if current is UIControl || current is UITextField { return false }
+            view = current.superview
+        }
+        return true
+    }
+
     /// 用紙色に合わせてテキストの文字色を切り替える(黒紙では白文字)
     func updatePageColor(_ pageColor: CanvasPageColor) {
-        guard kind == .text else { return }
-        textView.textColor = pageColor.contentUIColor
+        switch kind {
+        case .text: textView.textColor = pageColor.contentUIColor
+        case .todo: todoListView.updatePageColor(pageColor)
+        default: break
+        }
     }
 
     // MARK: - テキスト編集
 
     func beginTextEditing() {
-        guard kind == .text else { return }
-        textView.isEditable = true
-        textView.isUserInteractionEnabled = true
-        textView.becomeFirstResponder()
+        switch kind {
+        case .text:
+            textView.isEditable = true
+            textView.isUserInteractionEnabled = true
+            textView.becomeFirstResponder()
+        case .todo:
+            todoListView.beginEditingLastRow()
+        default:
+            break
+        }
     }
 
     private func endTextEditing() {
-        guard kind == .text, textView.isFirstResponder else { return }
-        textView.resignFirstResponder()
+        if kind == .text, textView.isFirstResponder {
+            textView.resignFirstResponder()
+        } else if kind == .todo {
+            todoListView.endEditing(true)
+        }
     }
 
     func textViewDidChange(_ textView: UITextView) {
@@ -429,8 +478,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         guard let layerView, layerView.isSelectMode else { return }
         if layerView.selectedID != objectID {
             layerView.select(objectID)
-        } else if kind == .text {
-            beginTextEditing()  // 選択済みのテキストを再タップで編集開始
+        } else if kind == .text || kind == .todo {
+            beginTextEditing()  // 選択済みのテキスト/Todoを再タップで編集開始
         }
     }
 
@@ -479,6 +528,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             if kind == .text {
                 newWidth = max(60, newWidth)
                 newHeight = max(40, newHeight)
+            } else if kind == .todo {
+                // 高さは行数(内容)で決まるので幅だけ変える
+                newWidth = max(160, newWidth)
+                newHeight = contentFrame.height
             } else {
                 // 画像 / PDF はアスペクト比を維持
                 let ratio = gestureStartFrame.height / max(gestureStartFrame.width, 1)
@@ -519,4 +572,254 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             }
         ])
     }
+}
+
+// MARK: - Todoリスト(チェックリスト)
+
+/// 空欄でのバックスペースを検知して「行削除」に使うテキストフィールド。
+private final class TodoRowTextField: UITextField {
+    var onDeleteBackwardWhenEmpty: (() -> Void)?
+    override func deleteBackward() {
+        let wasEmpty = (text ?? "").isEmpty
+        super.deleteBackward()
+        if wasEmpty { onDeleteBackwardWhenEmpty?() }
+    }
+}
+
+/// Todoの1行(チェックボックス + テキスト欄)。
+private final class TodoRowView: UIView, UITextFieldDelegate {
+    let checkbox = UIButton(type: .system)
+    let textField = TodoRowTextField()
+
+    var onToggle: (() -> Void)?
+    var onTextChanged: ((String) -> Void)?
+    var onCommit: (() -> Void)?     // 編集終了(保存点)
+    var onReturn: (() -> Void)?     // 改行 → 次の行を追加
+    var onDeleteEmpty: (() -> Void)?  // 空行でバックスペース → 行削除
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        checkbox.addTarget(self, action: #selector(handleToggle), for: .touchUpInside)
+        addSubview(checkbox)
+
+        textField.borderStyle = .none
+        textField.font = .systemFont(ofSize: 16)
+        textField.returnKeyType = .next
+        textField.autocorrectionType = .no
+        textField.delegate = self
+        textField.addTarget(self, action: #selector(handleEditingChanged), for: .editingChanged)
+        textField.onDeleteBackwardWhenEmpty = { [weak self] in self?.onDeleteEmpty?() }
+        addSubview(textField)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let checkSide: CGFloat = 24
+        checkbox.frame = CGRect(x: 0, y: (bounds.height - checkSide) / 2, width: checkSide + 6, height: checkSide)
+        let textX = checkbox.frame.maxX + 4
+        textField.frame = CGRect(x: textX, y: 0, width: max(0, bounds.width - textX), height: bounds.height)
+    }
+
+    /// 項目内容と用紙色を反映(完了は打ち消し線 + 淡色)。
+    func configure(item: TodoItem, pageColor: CanvasPageColor) {
+        let base = pageColor.contentUIColor
+        let symbol = item.done ? "checkmark.square.fill" : "square"
+        checkbox.setImage(UIImage(systemName: symbol), for: .normal)
+        checkbox.tintColor = item.done ? .systemGreen : base.withAlphaComponent(0.7)
+        checkbox.accessibilityIdentifier = "todo-checkbox"
+        checkbox.accessibilityValue = item.done ? "done" : "todo"
+
+        let font = UIFont.systemFont(ofSize: 16)
+        if item.done {
+            textField.attributedText = NSAttributedString(string: item.text, attributes: [
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .foregroundColor: base.withAlphaComponent(0.5),
+                .font: font
+            ])
+        } else {
+            textField.attributedText = nil
+            textField.text = item.text
+            textField.textColor = base
+            textField.font = font
+        }
+    }
+
+    @objc private func handleToggle() { onToggle?() }
+    @objc private func handleEditingChanged() { onTextChanged?(textField.text ?? "") }
+
+    func textFieldDidEndEditing(_ textField: UITextField) { onCommit?() }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        onReturn?()
+        return false
+    }
+}
+
+/// キャンバスに置くチェックリスト本体。行の追加/削除/チェックを管理し、変更を通知する。
+final class TodoListView: UIView {
+    /// 項目が変わった(保存すべき)ときに呼ばれる
+    var onItemsChanged: (([TodoItem]) -> Void)?
+    /// 行数に応じた必要高さ(コンテンツ空間)が変わったときに呼ばれる
+    var onHeightChanged: ((CGFloat) -> Void)?
+
+    private(set) var items: [TodoItem] = []
+    private var pageColor: CanvasPageColor = .white
+    private var rows: [TodoRowView] = []
+    private let addButton = UIButton(type: .system)
+
+    private static let rowHeight: CGFloat = 34
+    private static let vInset: CGFloat = 8
+    private static let hInset: CGFloat = 10
+
+    /// いずれかの行を編集中か(apply による上書きを避ける判定に使う)
+    var isEditing: Bool { rows.contains { $0.textField.isFirstResponder } }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.cornerRadius = 10
+        clipsToBounds = true
+
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "plus.circle")
+        config.title = "項目を追加"
+        config.imagePadding = 6
+        config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+        addButton.configuration = config
+        addButton.contentHorizontalAlignment = .leading
+        addButton.titleLabel?.font = .systemFont(ofSize: 15)
+        addButton.accessibilityIdentifier = "todo-add-item"
+        addButton.addTarget(self, action: #selector(handleAdd), for: .touchUpInside)
+        addSubview(addButton)
+
+        updateCardColor()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // MARK: - モデル反映
+
+    func setItems(_ newItems: [TodoItem]) {
+        items = newItems
+        if rows.count != newItems.count {
+            rebuildRows()
+        } else {
+            for (i, item) in newItems.enumerated() {
+                rows[i].configure(item: item, pageColor: pageColor)
+            }
+        }
+        setNeedsLayout()
+        reportHeight()
+    }
+
+    func updatePageColor(_ pageColor: CanvasPageColor) {
+        self.pageColor = pageColor
+        updateCardColor()
+        for (i, row) in rows.enumerated() where items.indices.contains(i) {
+            row.configure(item: items[i], pageColor: pageColor)
+        }
+    }
+
+    private func updateCardColor() {
+        // 用紙色に対してうっすら浮かぶカード。文字色は用紙色から取る。
+        backgroundColor = pageColor == .black
+            ? UIColor(white: 1, alpha: 0.10)
+            : UIColor(white: 0, alpha: 0.05)
+        addButton.tintColor = pageColor.contentUIColor.withAlphaComponent(0.6)
+        addButton.setTitleColor(pageColor.contentUIColor.withAlphaComponent(0.6), for: .normal)
+    }
+
+    // MARK: - レイアウト
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = bounds.width - Self.hInset * 2
+        var y = Self.vInset
+        for row in rows {
+            row.frame = CGRect(x: Self.hInset, y: y, width: width, height: Self.rowHeight)
+            y += Self.rowHeight
+        }
+        addButton.frame = CGRect(x: Self.hInset, y: y, width: width, height: Self.rowHeight)
+    }
+
+    /// 行数から必要高さを算出して通知する。
+    private func reportHeight() {
+        let height = Self.vInset * 2 + Self.rowHeight * CGFloat(items.count + 1)
+        onHeightChanged?(height)
+    }
+
+    // MARK: - 行の構築
+
+    private func rebuildRows() {
+        rows.forEach { $0.removeFromSuperview() }
+        rows = items.map { item in
+            let row = TodoRowView()
+            row.configure(item: item, pageColor: pageColor)
+            row.onToggle = { [weak self, weak row] in
+                guard let self, let row, let idx = self.rows.firstIndex(of: row) else { return }
+                self.items[idx].done.toggle()
+                self.rows[idx].configure(item: self.items[idx], pageColor: self.pageColor)
+                self.notify()
+            }
+            row.onTextChanged = { [weak self, weak row] text in
+                guard let self, let row, let idx = self.rows.firstIndex(of: row) else { return }
+                self.items[idx].text = text  // 保存は編集終了時(onCommit)にまとめて行う
+            }
+            row.onCommit = { [weak self] in self?.notify() }
+            row.onReturn = { [weak self, weak row] in
+                guard let self, let row, let idx = self.rows.firstIndex(of: row) else { return }
+                self.insertItem(after: idx)
+            }
+            row.onDeleteEmpty = { [weak self, weak row] in
+                guard let self, let row, let idx = self.rows.firstIndex(of: row) else { return }
+                self.deleteItem(at: idx)
+            }
+            addSubview(row)
+            return row
+        }
+        setNeedsLayout()
+    }
+
+    // MARK: - 操作
+
+    @objc private func handleAdd() {
+        items.append(TodoItem(text: "", done: false))
+        rebuildRows()
+        notify()
+        reportHeight()
+        focusRow(items.count - 1)
+    }
+
+    func beginEditingLastRow() {
+        if rows.isEmpty { handleAdd() } else { focusRow(rows.count - 1) }
+    }
+
+    private func insertItem(after index: Int) {
+        let newIndex = index + 1
+        items.insert(TodoItem(text: "", done: false), at: newIndex)
+        rebuildRows()
+        notify()
+        reportHeight()
+        focusRow(newIndex)
+    }
+
+    private func deleteItem(at index: Int) {
+        guard items.count > 1 else { return }  // 最後の1行は残す
+        items.remove(at: index)
+        rebuildRows()
+        notify()
+        reportHeight()
+        focusRow(max(0, index - 1))
+    }
+
+    private func focusRow(_ index: Int) {
+        guard rows.indices.contains(index) else { return }
+        layoutIfNeeded()
+        rows[index].textField.becomeFirstResponder()
+    }
+
+    private func notify() { onItemsChanged?(items) }
 }
