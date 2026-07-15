@@ -73,6 +73,7 @@ struct LibraryGridView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityIdentifier("library-add-menu")
             }
         }
         .safeAreaInset(edge: .bottom) {

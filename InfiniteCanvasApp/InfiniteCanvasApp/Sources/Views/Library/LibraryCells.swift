@@ -65,7 +65,7 @@ struct NoteCell: View {
                                 .resizable()
                                 .scaledToFill()
                         } else {
-                            Image(systemName: "scribble.variable")
+                            Image(systemName: note.canvasNoteType.icon)
                                 .font(.system(size: 36))
                                 .foregroundStyle(.quaternary)
                         }

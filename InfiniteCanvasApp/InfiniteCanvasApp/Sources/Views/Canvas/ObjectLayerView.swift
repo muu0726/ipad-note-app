@@ -1,6 +1,10 @@
 import UIKit
 import CoreData
 
+/// ノートリンクカードの「開く」ボタン。非選択モードでもこのボタンだけはタッチを通すため、
+/// ObjectAccessibleCanvasView.hitTest / 描画ジェスチャのゲートが型で識別できるよう専用クラスにする。
+final class NoteLinkOpenButton: UIButton {}
+
 /// オブジェクトレイヤーへ渡す表示用スナップショット(zOrder 昇順で渡す)
 struct CanvasObjectItem {
     let id: NSManagedObjectID
@@ -195,6 +199,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private let linkIcon = UIImageView()
     private let linkTitleLabel = UILabel()
     private let linkThumb = UIImageView()
+    /// カード右上の「開く」ボタン。選択モードでなくてもリンク先へ飛べるようにする専用の当たり判定。
+    private let linkOpenButton = NoteLinkOpenButton(type: .system)
 
     init(item: CanvasObjectItem, layerView: ObjectLayerUIView) {
         self.objectID = item.id
@@ -301,6 +307,21 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         linkTitleLabel.textColor = .label
         linkTitleLabel.numberOfLines = 2
         linkCard.addSubview(linkTitleLabel)
+
+        // 「開く」ボタンは linkCard(タッチ無効)ではなく self に載せ、どのツールでも押せるようにする。
+        // 非選択モードでのタッチ転送は ObjectAccessibleCanvasView.hitTest が担う。
+        linkOpenButton.setImage(UIImage(systemName: "arrow.up.forward.circle.fill"), for: .normal)
+        linkOpenButton.tintColor = .systemBlue
+        linkOpenButton.accessibilityIdentifier = "notelink-open"
+        linkOpenButton.accessibilityLabel = "リンク先を開く"
+        linkOpenButton.addTarget(self, action: #selector(handleOpenButtonTap), for: .touchUpInside)
+        addSubview(linkOpenButton)
+    }
+
+    /// 「開く」ボタン: 選択モードを問わずリンク先へジャンプする(ダブルタップと違い単タップ)。
+    @objc private func handleOpenButtonTap() {
+        guard kind == .noteLink else { return }
+        layerView?.onNoteLinkActivated?(objectID)
     }
 
     @available(*, unavailable)
@@ -319,6 +340,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
                 roundedRect: linkCard.bounds, cornerRadius: linkCard.layer.cornerRadius
             ).cgPath
             let inset: CGFloat = 12
+            // 右上に「開く」ボタンを配置し、タイトルはその分だけ手前で折り返す
+            let openSide: CGFloat = 28
+            linkOpenButton.frame = CGRect(x: bounds.width - openSide - 8, y: 8, width: openSide, height: openSide)
+            let titleTrailing = bounds.width - (openSide + 8) - 6  // ボタン左端の少し手前まで
             let hasThumb = linkThumb.image != nil
             if hasThumb {
                 let side = bounds.height - inset * 2
@@ -326,14 +351,14 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
                 linkThumb.isHidden = false
                 linkIcon.isHidden = true
                 let textX = linkThumb.frame.maxX + 12
-                linkTitleLabel.frame = CGRect(x: textX, y: inset, width: bounds.width - textX - inset, height: bounds.height - inset * 2)
+                linkTitleLabel.frame = CGRect(x: textX, y: inset, width: max(0, titleTrailing - textX), height: bounds.height - inset * 2)
             } else {
                 linkThumb.isHidden = true
                 linkIcon.isHidden = false
                 let iconSide: CGFloat = 24
                 linkIcon.frame = CGRect(x: inset, y: (bounds.height - iconSide) / 2, width: iconSide, height: iconSide)
                 let textX = linkIcon.frame.maxX + 10
-                linkTitleLabel.frame = CGRect(x: textX, y: inset, width: bounds.width - textX - inset, height: bounds.height - inset * 2)
+                linkTitleLabel.frame = CGRect(x: textX, y: inset, width: max(0, titleTrailing - textX), height: bounds.height - inset * 2)
             }
         }
     }

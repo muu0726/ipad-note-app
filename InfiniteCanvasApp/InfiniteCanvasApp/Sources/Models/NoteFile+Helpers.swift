@@ -11,6 +11,14 @@ enum CanvasNoteType: String, CaseIterable {
         case .paged: "通常ノート"
         }
     }
+
+    /// 一覧などで種別を見分けるためのアイコン(SF Symbols)
+    var icon: String {
+        switch self {
+        case .infinite: "arrow.up.left.and.arrow.down.right.square"  // 無限に広がるキャンバス
+        case .paged: "doc.text"                                       // 紙のページ(通常ノート)
+        }
+    }
 }
 
 extension NoteFile {

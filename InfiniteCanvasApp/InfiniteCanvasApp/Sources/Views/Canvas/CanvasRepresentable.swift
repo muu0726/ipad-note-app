@@ -513,10 +513,14 @@ final class ObjectAccessibleCanvasView: PKCanvasView {
     /// 選択モード中はここでオブジェクトへのヒットを優先し、移動・長押し・タップ選択を可能にする。
     /// (スクロール用ジェスチャはスクロールビュー自身に付いているので2本指スクロールは維持される)
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        if let objectLayer, objectLayer.isSelectMode {
+        if let objectLayer {
             let converted = convert(point, to: objectLayer)
             if let hit = objectLayer.hitTest(converted, with: event), hit !== objectLayer {
-                return hit
+                // 選択モードでは全オブジェクトへ、非選択モードでもノートリンクの「開く」
+                // ボタンだけはタッチを通し、どのツールでもリンク先へ飛べるようにする。
+                if objectLayer.isSelectMode || hit is NoteLinkOpenButton {
+                    return hit
+                }
             }
         }
         return super.hitTest(point, with: event)
@@ -527,6 +531,8 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     let canvasView = ObjectAccessibleCanvasView()
     let patternView = BackgroundPatternUIView()
     let objectLayer = ObjectLayerUIView()
+    /// 描画ジェスチャに差し込むゲート(ノートリンクの「開く」ボタン上ではインクを始めない)
+    private let drawingTouchGate = DrawingTouchGate()
 
     /// 選択モード(要件③)。描画ジェスチャを無効化し、単指はオブジェクト操作へ回す。
     /// オブジェクトがスクロールビュー内部にあるため、単指ドラッグでの誤スクロールを防ぐべく
@@ -560,6 +566,10 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         // オブジェクトがスクロールビュー内部にあるため、長押し等のジェスチャが
         // スクロールの遅延タッチに邪魔されないよう、タッチを即座に子ビューへ渡す
         canvasView.delaysContentTouches = false
+        // 描画ジェスチャの delegate を差し込む(元 delegate へは透過)。
+        // ノートリンクの「開く」ボタン上のタッチではストロークを始めさせない。
+        drawingTouchGate.forward = canvasView.drawingGestureRecognizer.delegate
+        canvasView.drawingGestureRecognizer.delegate = drawingTouchGate
         addSubview(canvasView)
 
         // 背景 → オブジェクトの順でキャンバス最背面へ差し込む。
@@ -596,6 +606,29 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool { true }
+}
+
+/// PKCanvasView の描画ジェスチャに差し込む delegate。ノートリンクの「開く」ボタン上で
+/// 始まるタッチだけストロークを拒否し、それ以外は PencilKit 本来の delegate へ透過する。
+/// (forwardingTarget で未実装メソッドを元 delegate に委譲し、描画挙動を壊さない)
+final class DrawingTouchGate: NSObject, UIGestureRecognizerDelegate {
+    weak var forward: UIGestureRecognizerDelegate?
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldReceive touch: UITouch) -> Bool {
+        if touch.view is NoteLinkOpenButton { return false }
+        return forward?.gestureRecognizer?(gestureRecognizer, shouldReceive: touch) ?? true
+    }
+
+    // shouldReceive 以外の UIGestureRecognizerDelegate 呼び出しは元 delegate へ丸ごと委譲する
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return forward?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        forward
+    }
 }
 
 /// 方眼 / ドットを描く背景ビュー。キャンバス(スクロールビュー)のコンテンツ内部に
