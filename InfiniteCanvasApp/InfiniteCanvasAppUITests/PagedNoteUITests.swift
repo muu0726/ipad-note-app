@@ -1,10 +1,10 @@
 import XCTest
 
-/// 通常ノート(固定ページ形式)のエンドツーエンド検証。
+/// 通常ノート(固定ページ形式・横スクロール)のエンドツーエンド検証。
 /// - 作成シートで「通常ノート」を選んで作成できること。
-/// - A4ページがグレー背景の上に表示されること。
 /// - ページ上に手書きできること。
-/// - 「ページを追加」でページが増え、下方向へスクロールすること。
+/// - 末尾を超えて横に引っ張るとページが自動追加されること(ページ追加ボタンは廃止)。
+/// - ページ削除とその Undo。
 final class PagedNoteUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -12,48 +12,51 @@ final class PagedNoteUITests: XCTestCase {
     }
 
     @MainActor
-    func testCreatePagedNoteDrawAndAddPage() throws {
+    func testCreatePagedNoteAndDraw() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
+        app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launch()
+        createPagedNote(app)
+
+        // 通常ノートのキャンバスが開く(設定ボタン = paged 判定)
+        XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
+                      "通常ノートが開かない(paged 判定失敗)")
+        attachScreenshot(app, name: "1-paged-note-created")
+
+        // ページ上に手書き(指描画許可時)
+        app.buttons["toolbar-tool-pen"].tap()
+        let canvas = app.windows.firstMatch
+        drag(canvas, from: (0.45, 0.40), to: (0.55, 0.55))
+        attachScreenshot(app, name: "2-ink-on-page")
+
+        XCTAssertTrue(app.buttons["paged-settings-button"].isHittable, "描画後にUIが操作不能(ハング)")
+    }
+
+    /// 末尾を超えて横に引っ張ると、ページが1枚自動追加される(GoodNotes 風)。
+    /// スクロール検証のため指描画は許可しない(指=スクロール)。
+    @MainActor
+    func testHorizontalOverscrollAddsPage() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
         app.launch()
+        createPagedNote(app)
 
-        // ライブラリへ戻る(タブ復元でキャンバスが開いている場合)
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
+                      "通常ノートが開かない")
+        // 1ページ目のみ = 削除ボタンはまだ無い
+        XCTAssertFalse(app.buttons["canvas-delete-page"].exists, "最初から複数ページになっている")
 
-        // 新規ノート作成シートを開く
-        let addTile = app.buttons["add-note-tile"]
-        if addTile.waitForExistence(timeout: 5) {
-            addTile.tap()
-        } else {
-            app.buttons["新規ノート"].firstMatch.tap()
-        }
-
-        // 「通常ノート」を選択して作成
-        let pagedSegment = segment(app, id: "note-type-paged")
-        XCTAssertTrue(pagedSegment.waitForExistence(timeout: 5), "ノート種類の選択が出ない")
-        pagedSegment.tap()
-        app.buttons["作成"].tap()
-
-        // 通常ノートのキャンバスが開く(戻るボタン + ページ追加ボタン)
-        XCTAssertTrue(backToLibrary.waitForExistence(timeout: 5), "ノートが開かない")
-        let addPage = app.buttons["canvas-add-page"]
-        XCTAssertTrue(addPage.waitForExistence(timeout: 5), "ページ追加ボタンが出ない(paged 判定失敗)")
-        attachScreenshot(app, name: "1-paged-note-created")
-
-        // ページ上に手書き
-        app.buttons["toolbar-tool-pen"].tap()
+        // 末尾を超えて左へ強く引っ張る(右方向オーバースクロール)を数回試す
         let canvas = app.windows.firstMatch
-        drag(canvas, from: (0.30, 0.30), to: (0.55, 0.55))
-        attachScreenshot(app, name: "2-ink-on-page")
-
-        // ページを追加 → 2ページ目へスクロール
-        addPage.tap()
-        // アニメーション/スクロール待ち
-        _ = app.buttons["toolbar-tool-pen"].waitForExistence(timeout: 3)
-        attachScreenshot(app, name: "3-page-added-scrolled")
-
-        XCTAssertTrue(addPage.isHittable, "ページ追加後にUIが操作不能(ハング)")
+        var added = false
+        for _ in 0..<4 {
+            drag(canvas, from: (0.9, 0.5), to: (0.05, 0.5))
+            if app.buttons["canvas-delete-page"].waitForExistence(timeout: 2) { added = true; break }
+        }
+        XCTAssertTrue(added, "末尾を超えて引っ張ってもページが追加されない")
+        attachScreenshot(app, name: "1-page-added-by-overscroll")
     }
 
     @MainActor
@@ -62,47 +65,58 @@ final class PagedNoteUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         createPagedNote(app)
+        XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
+                      "通常ノートが開かない")
 
-        // 2ページ目を追加して、そのページへスクロール
-        let addPage = app.buttons["canvas-add-page"]
-        XCTAssertTrue(addPage.waitForExistence(timeout: 5), "ページ追加ボタンが出ない")
-        addPage.tap()
-        _ = app.buttons["toolbar-tool-pen"].waitForExistence(timeout: 3)
+        // 2ページ目をオーバースクロールで追加(そのページへ自動スクロール)
+        let canvas = app.windows.firstMatch
+        let deletePage = app.buttons["canvas-delete-page"]
+        var added = false
+        for _ in 0..<4 {
+            drag(canvas, from: (0.9, 0.5), to: (0.05, 0.5))
+            if deletePage.waitForExistence(timeout: 2) { added = true; break }
+        }
+        XCTAssertTrue(added, "オーバースクロールで2ページ目を追加できない")
 
-        // 2ページ目にテキストオブジェクトを挿入
+        // 末尾ページ(2ページ目)にテキストオブジェクトを挿入(削除対象のページに載る)
         let marker = "\(Int.random(in: 10_000_000...99_999_999))"
         app.buttons["toolbar-insert-menu"].tap()
         app.buttons["テキスト"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "編集が始まらない")
         app.typeText(marker)
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.28)).tap()
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
         _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 5)
         let markerView = app.textViews.containing(NSPredicate(format: "value CONTAINS %@", marker)).firstMatch
-        XCTAssertTrue(markerView.waitForExistence(timeout: 5), "テキストが2ページ目に置けていない")
+        XCTAssertTrue(markerView.waitForExistence(timeout: 5), "テキストが末尾ページに置けていない")
 
-        // ページ削除(確認アラート → 削除)
-        let deletePage = app.buttons["canvas-delete-page"]
+        // ページ削除(確認アラート → 削除)。末尾ページとその上のオブジェクトが消える。
+        // 横ページングでは削除後に先頭へクランプされ、末尾ページのオブジェクトは画面外になる。
+        // (末尾へ戻すスクロールは自動ページ追加と競合するため、ここではページ構造の
+        //  削除/Undo/Redo を「削除ボタンの出没」で確定的に検証する)
         XCTAssertTrue(deletePage.waitForExistence(timeout: 3), "ページ削除ボタンが出ない")
         deletePage.tap()
         app.buttons["削除"].tap()
-
-        // 2ページ目のオブジェクトが消え、ページ数が1に戻る(削除ボタンが消える)
+        // ページ数が1に戻る(削除ボタンが消える)。marker も画面から消える。
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: markerView)
         waitForExpectations(timeout: 5)
         XCTAssertFalse(deletePage.exists, "ページが減っていない(削除ボタンが残っている)")
         attachScreenshot(app, name: "1-after-delete-page")
 
-        // Undo でページとオブジェクトが復活する
+        // Undo → ページ構造(とその上のオブジェクト)が復活し、削除ボタンが戻る
         app.buttons["toolbar-undo"].tap()
-        XCTAssertTrue(markerView.waitForExistence(timeout: 5), "Undo でオブジェクトが復活しない")
-        XCTAssertTrue(app.buttons["canvas-delete-page"].waitForExistence(timeout: 3),
+        XCTAssertTrue(app.buttons["canvas-delete-page"].waitForExistence(timeout: 5),
                       "Undo でページ数が戻っていない")
         attachScreenshot(app, name: "2-after-undo")
+
+        // Redo → 再びページが削除され、削除ボタンが消える(履歴が双方向に効く)
+        app.buttons["toolbar-redo"].tap()
+        XCTAssertTrue(app.buttons["canvas-delete-page"].waitForNonExistence(timeout: 5),
+                      "Redo でページ削除が再適用されない")
+        attachScreenshot(app, name: "3-after-redo")
     }
 
     // MARK: - ヘルパー
 
-    /// 「通常ノート」を新規作成して開く
     @MainActor
     private func createPagedNote(_ app: XCUIApplication) {
         let backToLibrary = app.buttons["書類"]
@@ -117,9 +131,6 @@ final class PagedNoteUITests: XCTestCase {
         _ = backToLibrary.waitForExistence(timeout: 5)
     }
 
-    /// セグメントピッカーの各セグメント(付与した accessibilityIdentifier で引く)。
-    /// segmented Picker の各要素は buttons として公開されないことがあるため
-    /// 種別を問わず identifier でマッチする。
     @MainActor
     private func segment(_ app: XCUIApplication, id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch

@@ -5,6 +5,7 @@ struct SidebarView: View {
     @Binding var selection: SidebarSelection?
     @ObservedObject var actions: LibraryActionCoordinator
     @Environment(\.managedObjectContext) private var context
+    @EnvironmentObject private var session: OpenNotesSession
     @State private var isRootDropTargeted = false
 
     @FetchRequest(
@@ -55,18 +56,28 @@ struct SidebarView: View {
         }
         .navigationTitle("ノート")
         .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 20) {
-                Button {
-                    actions.beginCreateFolder(in: currentFolder)
-                } label: {
-                    Label("フォルダ", systemImage: "folder.badge.plus")
+            VStack(alignment: .leading, spacing: 6) {
+                // 作成先を明示(IDE のように「今どこに作るか」が分かるように)
+                Label("作成先: \(currentFolderName)", systemImage: "arrow.down.right.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("sidebar-create-target")
+                HStack(spacing: 20) {
+                    Button {
+                        actions.beginCreateFolder(in: currentFolder)
+                    } label: {
+                        Label("フォルダ", systemImage: "folder.badge.plus")
+                    }
+                    .accessibilityIdentifier("sidebar-create-folder")
+                    Button {
+                        actions.beginCreateNote(in: currentFolder)
+                    } label: {
+                        Label("ノート", systemImage: "square.and.pencil")
+                    }
+                    .accessibilityIdentifier("sidebar-create-note")
+                    Spacer()
                 }
-                Button {
-                    actions.beginCreateNote(in: currentFolder)
-                } label: {
-                    Label("ノート", systemImage: "square.and.pencil")
-                }
-                Spacer()
             }
             .padding(.horizontal)
             .padding(.vertical, 10)
@@ -74,9 +85,20 @@ struct SidebarView: View {
         }
     }
 
-    /// 新規作成先: サイドバーで選択中のフォルダ、なければルート
+    /// 新規作成先のフォルダ。
+    /// 作業中(ノートを開いてキャンバス表示中)は、その作業ファイルのフォルダに作る。
+    /// それ以外はサイドバーで選択中(またはドロップダウンを開いた)のフォルダ、なければルート。
     private var currentFolder: Folder? {
+        if session.isCanvasVisible, let note = session.selectedNote,
+           !note.isDeleted, !note.isTrashed {
+            return note.folder
+        }
         if case .folder(let folder) = selection { return folder }
         return nil
+    }
+
+    /// 作成先の表示名(ルートは「すべてのノート」)
+    private var currentFolderName: String {
+        currentFolder?.displayName ?? "すべてのノート"
     }
 }

@@ -46,5 +46,10 @@ struct FolderTreeNode: View {
                 isDropTargeted ? Color.accentColor.opacity(0.18) : nil
             )
         }
+        // ドロップダウンを開いたら、そのフォルダを作成先(選択)にする
+        // (IDE のように「開いているフォルダ」の中に新規作成される)
+        .onChange(of: isExpanded) { _, expanded in
+            if expanded { selection = .folder(folder) }
+        }
     }
 }

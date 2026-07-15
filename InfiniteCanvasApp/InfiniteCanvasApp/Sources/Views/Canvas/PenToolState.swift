@@ -51,13 +51,14 @@ enum CanvasPageColor: String, CaseIterable {
 }
 
 enum CanvasBackgroundStyle: String, CaseIterable {
-    case blank, grid, dots
+    case blank, grid, dots, lines
 
     var label: String {
         switch self {
         case .blank: "白紙"
         case .grid: "方眼"
         case .dots: "ドット"
+        case .lines: "横線"
         }
     }
 }

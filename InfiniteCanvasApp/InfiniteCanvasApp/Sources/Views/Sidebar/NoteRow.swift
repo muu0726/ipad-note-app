@@ -26,7 +26,33 @@ struct ItemContextMenu: View {
     let item: LibraryItem
     @ObservedObject var actions: LibraryActionCoordinator
 
+    /// 「この中に作成」する対象フォルダ。フォルダなら自身、ノートならその所属フォルダ(ルートは nil)
+    private var containerFolder: Folder? {
+        switch item {
+        case .folder(let folder): return folder
+        case .note(let note): return note.folder
+        }
+    }
+
+    /// 作成アクションの見出し(フォルダは「この中に」、ノートは「同じ場所に」)
+    private var createTitleSuffix: String {
+        if case .folder = item { return "この中に" }
+        return "同じ場所に"
+    }
+
     var body: some View {
+        // IDE 風に、右クリック(長押し)からその場に新規作成できる
+        Button {
+            actions.beginCreateNote(in: containerFolder)
+        } label: {
+            Label("新規ノート(\(createTitleSuffix))", systemImage: "square.and.pencil")
+        }
+        Button {
+            actions.beginCreateFolder(in: containerFolder)
+        } label: {
+            Label("新規フォルダ(\(createTitleSuffix))", systemImage: "folder.badge.plus")
+        }
+        Divider()
         Button {
             actions.beginRename(item)
         } label: {

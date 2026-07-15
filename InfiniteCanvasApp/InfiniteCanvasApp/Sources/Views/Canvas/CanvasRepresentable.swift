@@ -126,6 +126,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onLassoObjectsDeleted: (CGRect) -> Void
     /// ノートリンクのダブルタップでリンク先ノートを開く要求
     let onNoteLinkActivated: (NSManagedObjectID) -> Void
+    /// 通常ノートで、最後のページを超えて横に引っ張ったときにページを1枚追加する要求
+    let onAppendPage: () -> Void
     /// Undo/Redo ブリッジなどにキャンバスを渡す
     let onCanvasReady: (PKCanvasView) -> Void
 
@@ -162,6 +164,26 @@ struct CanvasRepresentable: UIViewRepresentable {
         canvas.alwaysBounceHorizontal = horizontal
         canvas.alwaysBounceVertical = noteType != .paged || !isHorizontalScroll
         canvas.isPagingEnabled = horizontal
+
+        // ズーム倍率: 通常ノートは Goodnotes 風に控えめ、無限キャンバスは広めに許容する
+        switch noteType {
+        case .paged:
+            canvas.minimumZoomScale = 0.5
+            canvas.maximumZoomScale = 3.0
+        case .infinite:
+            canvas.minimumZoomScale = 0.1
+            canvas.maximumZoomScale = 5.0
+        }
+
+        // 用紙外(通常ノートのグレー余白)での描画を無効化する。
+        // ページ矩形はコンテンツ座標なので、ここで現在のページ数に合わせて毎回作り直す
+        // (ページ追加/削除に追従する)。
+        let currentNoteType = noteType
+        let pageRects = (0..<max(1, pageCount)).map { layout.pageRect($0) }
+        container.drawingTouchGate.isTouchAllowed = { point in
+            if currentNoteType == .infinite { return true }
+            return pageRects.contains { $0.contains(point) }
+        }
 
         container.patternView.configure(
             noteType: noteType, layout: layout,
@@ -319,6 +341,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                 ? CGPoint(x: lastRect.minX * canvas.zoomScale - PageMetrics.margin, y: canvas.contentOffset.y)
                 : CGPoint(x: canvas.contentOffset.x, y: lastRect.minY * canvas.zoomScale - PageMetrics.margin)
             canvas.setContentOffset(target, animated: true)
+            // 追加が反映されたのでオーバースクロール追加のガードを解除(次のめくりで再度追加可能)
+            context.coordinator.didRequestPageAppend = false
         }
         context.coordinator.lastPageCount = pageCount
 
@@ -341,6 +365,8 @@ struct CanvasRepresentable: UIViewRepresentable {
         var lastStrokeCount = 0
         /// 直近のページ数。増えたらページ追加とみなしてスクロールする(通常ノート)
         var lastPageCount = 1
+        /// 末尾オーバースクロールでのページ追加を要求済みか(1ドラッグにつき1回に抑える)
+        var didRequestPageAppend = false
         /// 直近のレイアウト設定(見開き/スクロール方向)。変化時のみフィット/センタリングし直す。
         /// ページ数はここに含めない(ページ追加はスクロール処理側で扱う)
         var lastIsTwoPage = false
@@ -373,6 +399,28 @@ struct CanvasRepresentable: UIViewRepresentable {
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
             )
+        }
+
+        /// 通常ノート(横スクロール)で、スクロール限界より右へバウンス(オーバースクロール)した量(pt)。
+        /// ページを増やせない状況(無限/縦)や末尾でないときは 0。
+        /// コンテンツが画面より狭い場合でも「限界を超えて引っ張った量」だけを測る。
+        private func rightOverscroll(_ scrollView: UIScrollView) -> CGFloat {
+            guard parent.noteType == .paged, parent.isHorizontalScroll else { return 0 }
+            let contentW = parent.layout.contentSize.width * scrollView.zoomScale
+            // 右端の通常スクロール限界(バウンスしていない最大 contentOffset.x)
+            let maxOffsetX = max(-scrollView.contentInset.left,
+                                 contentW - scrollView.bounds.width + scrollView.contentInset.right)
+            return scrollView.contentOffset.x - maxOffsetX
+        }
+
+        /// 末尾を超えて一定量めくったら、指を離した時点でページを1枚追加する(GoodNotes 風)。
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            // しきい値: 画面幅の15%(上限140pt)を超えて引っ張ったら追加
+            let threshold = min(scrollView.bounds.width * 0.15, 140)
+            if !didRequestPageAppend, rightOverscroll(scrollView) > threshold {
+                didRequestPageAppend = true   // updateUIView でページ数増加を検知したら解除
+                parent.onAppendPage()
+            }
         }
 
         /// ズーム時のみ、スナップ閾値用の倍率更新と背景タイルの高解像度化を行う(スクロールには不干渉)。
@@ -451,10 +499,10 @@ struct CanvasRepresentable: UIViewRepresentable {
                     var image: UIImage?
                     var linkTitle = ""
                     if object.objectKind == .noteLink {
-                        // リンク先タイトルとサムネイルを毎回引き直す(リネーム等に追従)
-                        let linked = object.resolvedLinkedNote
-                        linkTitle = linked?.displayTitle ?? ""
-                        image = linked?.thumbnailData.flatMap { UIImage(data: $0) }
+                        // リンク先タイトルを毎回引き直す(リネーム等に追従)。
+                        // アイコンはリンク先の中身の有無に関わらず固定(ドキュメントアイコン)にするため、
+                        // サムネイルは渡さない(image は nil のまま)。
+                        linkTitle = object.resolvedLinkedNote?.displayTitle ?? ""
                     } else if object.objectKind != .text && object.objectKind != .todo {
                         if let cached = imageCache[object.objectID] {
                             image = cached
@@ -531,8 +579,8 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     let canvasView = ObjectAccessibleCanvasView()
     let patternView = BackgroundPatternUIView()
     let objectLayer = ObjectLayerUIView()
-    /// 描画ジェスチャに差し込むゲート(ノートリンクの「開く」ボタン上ではインクを始めない)
-    private let drawingTouchGate = DrawingTouchGate()
+    /// 描画ジェスチャに差し込むゲート(「開く」ボタン上・用紙外ではインクを始めない)
+    let drawingTouchGate = DrawingTouchGate()
 
     /// 選択モード(要件③)。描画ジェスチャを無効化し、単指はオブジェクト操作へ回す。
     /// オブジェクトがスクロールビュー内部にあるため、単指ドラッグでの誤スクロールを防ぐべく
@@ -554,7 +602,13 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         // 用紙色(白/黒)はアプリ側で管理しているため反転を止め、選んだ色のまま描く
         overrideUserInterfaceStyle = .light
 
-        canvasView.drawingPolicy = .anyInput  // Apple Pencil + 指の両方で描画(要件③)
+        // Apple Pencil でのみ描画する(Pencil Only)。指のタッチは描画に使わず、
+        // スクロール(1本指)・ピンチズーム(2本指)として機能させる。
+        // ※ allowsFingerDrawing は iOS14 以降非推奨のため、モダンな drawingPolicy を使う。
+        // ※ XCUITest は Pencil 入力を模倣できないため、ALLOW_FINGER_DRAWING=1 のときだけ
+        //   指描画を許可する(自動テストの描画検証用。製品では常に pencilOnly)。
+        let allowFingerDrawing = ProcessInfo.processInfo.environment["ALLOW_FINGER_DRAWING"] == "1"
+        canvasView.drawingPolicy = allowFingerDrawing ? .anyInput : .pencilOnly
         // 描画面を透過にして、最背面へ差し込む背景・オブジェクトを見せる(インクは常に上)。
         // 用紙色はコンテナ側で塗る(はみ出し/バウンス領域もこれで埋まる)。
         canvasView.backgroundColor = .clear
@@ -614,9 +668,19 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
 final class DrawingTouchGate: NSObject, UIGestureRecognizerDelegate {
     weak var forward: UIGestureRecognizerDelegate?
 
+    /// タッチ位置(描画ジェスチャのビュー座標=キャンバスのコンテンツ座標)が
+    /// 有効な描画領域かを判定する。nil の場合は制限しない。
+    /// 通常ノートでは用紙(ページ矩形)内のみ true にして、用紙外(グレー背景)の描画を防ぐ。
+    var isTouchAllowed: ((CGPoint) -> Bool)?
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldReceive touch: UITouch) -> Bool {
         if touch.view is NoteLinkOpenButton { return false }
+        // 用紙外(通常ノートのグレー余白)など、描画を許可しない領域ではストロークを始めない
+        if let isTouchAllowed, let view = gestureRecognizer.view,
+           !isTouchAllowed(touch.location(in: view)) {
+            return false
+        }
         return forward?.gestureRecognizer?(gestureRecognizer, shouldReceive: touch) ?? true
     }
 
@@ -757,6 +821,13 @@ final class BackgroundPatternUIView: UIView {
                 // マス中央にドット(40pt グリッドのドット背景)
                 pageColor.patternUIColor.setFill()
                 c.fillEllipse(in: CGRect(x: spacing / 2 - 1.5, y: spacing / 2 - 1.5, width: 3, height: 3))
+            case .lines:
+                // 上辺に横線を引くと、タイリングで 40pt 間隔の横罫線になる
+                pageColor.patternUIColor.setStroke()
+                c.setLineWidth(0.5)
+                c.move(to: CGPoint(x: 0, y: 0))
+                c.addLine(to: CGPoint(x: spacing, y: 0))
+                c.strokePath()
             case .blank:
                 break
             }

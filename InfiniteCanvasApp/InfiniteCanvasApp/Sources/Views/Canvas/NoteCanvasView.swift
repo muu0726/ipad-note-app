@@ -67,7 +67,8 @@ struct NoteCanvasView: View {
                 noteType: note.canvasNoteType,
                 pageCount: note.resolvedPageCount,
                 isTwoPageLayout: note.isTwoPageLayout,
-                isHorizontalScroll: note.isHorizontalScroll,
+                // 通常ノートは横スクロール固定(既存サービス同様のページめくり)
+                isHorizontalScroll: note.canvasNoteType == .paged ? true : note.isHorizontalScroll,
                 objects: Array(objects),
                 autoFocusObjectID: autoFocusObjectID,
                 initialViewport: session.viewports[note.objectID],
@@ -150,6 +151,7 @@ struct NoteCanvasView: View {
                 onNoteLinkActivated: { id in
                     openLinkedNote(objectID: id)
                 },
+                onAppendPage: { addPage() },
                 onCanvasReady: { undoBridge.attach($0) }
             )
             .onChange(of: insertion) { _, request in
@@ -157,14 +159,12 @@ struct NoteCanvasView: View {
                 insert(request, viewSize: geo.size)
                 insertion = nil
             }
-            // ページ追加/削除ボタン(通常ノートのみ・右下フローティング)
+            // ページ削除ボタン(通常ノートのみ・右下フローティング)。
+            // ページ追加は「末尾を超えて横に引っ張る」オーバースクロールで自動化した。
             .overlay(alignment: .bottomTrailing) {
-                if note.canvasNoteType == .paged {
-                    HStack(spacing: 12) {
-                        if note.resolvedPageCount > 1 { deletePageButton }
-                        addPageButton
-                    }
-                    .padding(24)
+                if note.canvasNoteType == .paged, note.resolvedPageCount > 1 {
+                    deletePageButton
+                        .padding(24)
                 }
             }
             .alert("最後のページを削除しますか？", isPresented: $showDeletePageConfirm) {
@@ -196,6 +196,11 @@ struct NoteCanvasView: View {
             if toolState.penColor == page.backgroundUIColor {
                 toolState.penColor = page.contentUIColor
             }
+            // 通常ノートは横スクロール固定へ移行(旧・縦スクロール設定のノートも揃える)
+            if note.canvasNoteType == .paged, !note.isHorizontalScroll {
+                note.isHorizontalScroll = true
+                try? context.save()
+            }
         }
         .onDisappear {
             // タブ切替・ライブラリ復帰時は即時保存
@@ -215,14 +220,13 @@ struct NoteCanvasView: View {
                 .padding(.bottom, 4)
             Toggle("見開き2ページ表示", isOn: Binding(
                 get: { note.isTwoPageLayout },
-                set: { setLayout(twoPage: $0, horizontal: note.isHorizontalScroll) }
+                set: { setLayout(twoPage: $0, horizontal: true) }
             ))
             .accessibilityIdentifier("toggle-two-page")
-            Toggle("横スクロール (ページめくり)", isOn: Binding(
-                get: { note.isHorizontalScroll },
-                set: { setLayout(twoPage: note.isTwoPageLayout, horizontal: $0) }
-            ))
-            .accessibilityIdentifier("toggle-horizontal-scroll")
+            // 通常ノートは横スクロール(ページめくり)固定。末尾を超えて引っ張ると自動でページ追加。
+            Text("横スクロール(ページめくり)。最後のページの先へ引っ張るとページが追加されます。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(20)
         .frame(width: 300)
@@ -241,14 +245,6 @@ struct NoteCanvasView: View {
     }
 
     // MARK: - ページ追加(通常ノート)
-
-    private var addPageButton: some View {
-        Button(action: addPage) {
-            pageButtonLabel("ページを追加", systemImage: "plus")
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("canvas-add-page")
-    }
 
     private var deletePageButton: some View {
         Button { showDeletePageConfirm = true } label: {
@@ -290,7 +286,7 @@ struct NoteCanvasView: View {
         let layout = PagedLayoutCalculator(
             pageCount: oldCount,
             isTwoPageLayout: note.isTwoPageLayout,
-            isHorizontalScroll: note.isHorizontalScroll
+            isHorizontalScroll: true  // 通常ノートは横スクロール固定
         )
         let lastRect = layout.pageRect(oldCount - 1)
         func isOnLastPage(_ rect: CGRect) -> Bool {

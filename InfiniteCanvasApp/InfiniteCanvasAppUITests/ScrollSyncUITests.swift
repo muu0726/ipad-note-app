@@ -15,6 +15,8 @@ final class ScrollSyncUITests: XCTestCase {
     func testGridAndInkZoomTogether() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
+        app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
         app.launch()
         try openAnyNote(app)
         setGridBackground(app)
@@ -41,6 +43,8 @@ final class ScrollSyncUITests: XCTestCase {
     func testTextObjectRendersInsideCanvas() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
+        app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
         app.launch()
         try openAnyNote(app)
 

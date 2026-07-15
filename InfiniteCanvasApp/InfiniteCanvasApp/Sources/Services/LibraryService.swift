@@ -37,6 +37,7 @@ enum LibraryService {
         note.pageColor = pageColor.rawValue
         note.noteType = noteType.rawValue
         note.pageCount = 1  // 通常ノートは1ページから開始
+        note.isHorizontalScroll = (noteType == .paged)  // 通常ノートは横スクロール固定
         save(context)
         return note
     }
@@ -62,10 +63,15 @@ enum LibraryService {
         note.pageColor = CanvasPageColor.white.rawValue
         note.noteType = CanvasNoteType.paged.rawValue
         note.pageCount = Int16(document.pageCount)
+        note.isHorizontalScroll = true  // 通常ノートは横スクロール固定
 
+        // ページ背景は表示レイアウト(横スクロール・1ページ)と同じ位置へ置く
+        let layout = PagedLayoutCalculator(
+            pageCount: document.pageCount, isTwoPageLayout: false, isHorizontalScroll: true
+        )
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
-            let rect = PageMetrics.pageRect(index)
+            let rect = layout.pageRect(index)
             let object = CanvasObject(context: context)
             object.id = UUID()
             object.createdAt = .now

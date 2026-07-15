@@ -1,10 +1,9 @@
 import XCTest
 
-/// 通常ノートの「見開き2ページ / 横スクロール」設定の検証。
-/// - 設定ボタン(info.circle)→ ポップオーバーで2つのトグルが出る。
+/// 通常ノートの「見開き2ページ表示」設定の検証(横スクロールは固定になったためトグルは無い)。
+/// - 設定ボタン(info.circle)→ ポップオーバーで見開きトグルが出る。
 /// - トグルを切り替えても即時かつ安全(クラッシュ・ハングなし)にレイアウトが組み替わる。
-/// レイアウト幾何そのものは PagedLayoutCalculatorTests(ユニット)で担保し、ここでは
-/// 4通りの組み合わせを実際に切り替えて UI が応答し続けることを確認する。
+/// レイアウト幾何そのものは PagedLayoutCalculatorTests(ユニット)で担保する。
 final class PagedLayoutUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -12,74 +11,50 @@ final class PagedLayoutUITests: XCTestCase {
     }
 
     @MainActor
-    func testToggleLayoutsStayResponsive() throws {
+    func testToggleTwoPageStaysResponsive() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
+        app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
         app.launch()
         createPagedNote(app)
 
-        let addPage = app.buttons["canvas-add-page"]
-        XCTAssertTrue(addPage.waitForExistence(timeout: 5), "通常ノートが開かない")
-
-        // 2ページ目を追加(見開き/横の効果が見えるように)
-        addPage.tap()
-        _ = app.buttons["toolbar-tool-pen"].waitForExistence(timeout: 3)
-
         let settings = app.buttons["paged-settings-button"]
-        XCTAssertTrue(settings.waitForExistence(timeout: 5), "設定ボタンが出ない")
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), "通常ノートが開かない(設定ボタン無し)")
 
-        // 4通り(見開き × 横スクロール)を順に切り替え、毎回 UI が応答することを確認
-        setLayout(app, twoPage: true, horizontal: false)
-        assertResponsive(app, step: "見開き・縦")
+        setTwoPage(app, on: true)
+        assertResponsive(app, step: "見開きON")
 
-        setLayout(app, twoPage: true, horizontal: true)
-        assertResponsive(app, step: "見開き・横")
-
-        setLayout(app, twoPage: false, horizontal: true)
-        assertResponsive(app, step: "単ページ・横")
-
-        setLayout(app, twoPage: false, horizontal: false)
-        assertResponsive(app, step: "単ページ・縦(初期に戻す)")
+        setTwoPage(app, on: false)
+        assertResponsive(app, step: "見開きOFF")
     }
 
     // MARK: - ヘルパー
 
-    /// 設定ポップオーバーを開き、2つのトグルを目標状態へ合わせて閉じる
+    /// 設定ポップオーバーを開き、見開きトグルを目標状態へ合わせて閉じる
     @MainActor
-    private func setLayout(_ app: XCUIApplication, twoPage: Bool, horizontal: Bool) {
+    private func setTwoPage(_ app: XCUIApplication, on: Bool) {
         app.buttons["paged-settings-button"].tap()
-
         let twoPageToggle = app.switches["toggle-two-page"]
         XCTAssertTrue(twoPageToggle.waitForExistence(timeout: 5), "見開きトグルが出ない")
-        setSwitch(twoPageToggle, on: twoPage)
-
-        let horizontalToggle = app.switches["toggle-horizontal-scroll"]
-        XCTAssertTrue(horizontalToggle.waitForExistence(timeout: 3), "横スクロールトグルが出ない")
-        setSwitch(horizontalToggle, on: horizontal)
-
+        let isOn = (twoPageToggle.value as? String) == "1"
+        if isOn != on { twoPageToggle.tap() }
         // ポップオーバーを閉じる(キャンバス上部を軽くタップ)
         app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
-    }
-
-    /// スイッチを目標状態へ(現在値と違うときだけタップ)
-    @MainActor
-    private func setSwitch(_ toggle: XCUIElement, on: Bool) {
-        let isOn = (toggle.value as? String) == "1"
-        if isOn != on { toggle.tap() }
     }
 
     /// レイアウト切替後も UI がハングせず操作できることを確認する
     @MainActor
     private func assertResponsive(_ app: XCUIApplication, step: String) {
-        let addPage = app.buttons["canvas-add-page"]
-        XCTAssertTrue(addPage.waitForExistence(timeout: 5), "[\(step)] ページ追加ボタンが消えた")
-        XCTAssertTrue(addPage.isHittable, "[\(step)] レイアウト切替後に UI がハングしている")
+        let settings = app.buttons["paged-settings-button"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5), "[\(step)] 設定ボタンが消えた")
+        XCTAssertTrue(settings.isHittable, "[\(step)] レイアウト切替後に UI がハングしている")
         // ペン選択 → 一筆描いて描画系が生きていることも確認
         app.buttons["toolbar-tool-pen"].tap()
         let canvas = app.windows.firstMatch
-        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.35))
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.4))
             .press(forDuration: 0.05,
-                   thenDragTo: canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+                   thenDragTo: canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.5)))
         XCTAssertTrue(app.buttons["paged-settings-button"].isHittable,
                       "[\(step)] 描画後に設定ボタンが操作不能")
         attachScreenshot(app, name: step)
