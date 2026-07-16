@@ -1,6 +1,7 @@
 import CoreData
 import UIKit
 import PencilKit
+import OSLog
 
 /// 削除・追加の Undo/Redo でオブジェクトを再構築するための全属性スナップショット
 struct CanvasObjectSnapshot {
@@ -39,6 +40,15 @@ struct CanvasObjectSnapshot {
 /// - Undo 実行時は Core Data を直接更新して保存する。ビュー側は @FetchRequest 経由で
 ///   変更を受け取り、ObjectLayerUIView.sync(items:) で表示へ反映される。
 enum CanvasObjectUndo {
+    private static let logger = Logger(subsystem: "com.muu0726.InfiniteCanvasApp", category: "CanvasObjectUndo")
+
+    /// Undo登録経由でないままオブジェクトが消えていた場合、fetch失敗でこの逆操作の
+    /// 再登録(Redo/次のUndo用)がスキップされ、Undo/Redoスタックが1つ飛ぶことがある。
+    /// 復旧はできないため、せめてログに残して原因追跡できるようにする。
+    private static func logMissingObject(_ uuid: UUID, in function: StaticString = #function) {
+        logger.error("Undo/Redo対象のオブジェクト(\(uuid.uuidString, privacy: .public))が見つからず、逆操作が再登録されませんでした(\(function))")
+    }
+
     /// 移動・リサイズ・テキスト自動拡張のフレーム変更
     static func registerFrameChange(
         objectUUID: UUID,
@@ -50,7 +60,7 @@ enum CanvasObjectUndo {
         guard let manager else { return }
         manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
             MainActor.assumeIsolated {
-                guard let object = fetchObject(objectUUID, in: context) else { return }
+                guard let object = fetchObject(objectUUID, in: context) else { logMissingObject(objectUUID); return }
                 let current = object.contentFrame
                 object.contentFrame = previousFrame
                 object.updatedAt = .now
@@ -76,7 +86,7 @@ enum CanvasObjectUndo {
         guard let manager else { return }
         manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
             MainActor.assumeIsolated {
-                guard let object = fetchObject(objectUUID, in: context) else { return }
+                guard let object = fetchObject(objectUUID, in: context) else { logMissingObject(objectUUID); return }
                 let current = object.text ?? ""
                 object.text = previousText
                 object.updatedAt = .now
@@ -101,7 +111,7 @@ enum CanvasObjectUndo {
         guard let manager else { return }
         manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
             MainActor.assumeIsolated {
-                guard let object = fetchObject(objectUUID, in: context) else { return }
+                guard let object = fetchObject(objectUUID, in: context) else { logMissingObject(objectUUID); return }
                 let current = object.payload
                 object.payload = previousPayload
                 object.updatedAt = .now
@@ -126,7 +136,7 @@ enum CanvasObjectUndo {
         guard let manager else { return }
         manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
             MainActor.assumeIsolated {
-                guard let object = fetchObject(objectUUID, in: context) else { return }
+                guard let object = fetchObject(objectUUID, in: context) else { logMissingObject(objectUUID); return }
                 let current = object.fontSize
                 object.fontSize = previousFontSize
                 object.updatedAt = .now
@@ -153,7 +163,7 @@ enum CanvasObjectUndo {
                 guard let object = fetchObject(objectUUID, in: context),
                       // Undo 時点の状態(移動・編集済みかもしれない)で復元できるよう撮り直す
                       let snapshot = CanvasObjectSnapshot(object: object)
-                else { return }
+                else { logMissingObject(objectUUID); return }
                 context.delete(object)
                 saveAndRefresh(context: context, bridge: bridge)
                 registerDelete(snapshot: snapshot, in: manager, context: context, bridge: bridge)
@@ -234,7 +244,12 @@ enum CanvasObjectUndo {
     ) {
         guard let note = (try? context.existingObject(with: snapshot.noteID)) as? NoteFile,
               !note.isDeleted
-        else { return }
+        else {
+            // ノート自体が削除済み。このあと registerInsert が積まれても対象オブジェクトは
+            // 復元されていないため、次の Undo/Redo で fetchObject が失敗する(logMissingObject 参照)
+            logMissingObject(snapshot.id)
+            return
+        }
         let object = CanvasObject(context: context)
         object.id = snapshot.id
         object.kind = snapshot.kind

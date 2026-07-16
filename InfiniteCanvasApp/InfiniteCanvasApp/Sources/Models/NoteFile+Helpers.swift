@@ -38,4 +38,42 @@ extension NoteFile {
     var resolvedPageCount: Int {
         max(1, Int(pageCount))
     }
+
+    // MARK: - しおり(ブックマーク)
+
+    /// しおりを付けたページ index の集合。`bookmarkedPages`(JSON文字列)に保存する。
+    var bookmarkedPageSet: Set<Int> {
+        get {
+            guard let json = bookmarkedPages, let data = json.data(using: .utf8),
+                  let list = try? JSONDecoder().decode([Int].self, from: data) else { return [] }
+            return Set(list)
+        }
+        set {
+            let list = newValue.sorted()
+            bookmarkedPages = (try? JSONEncoder().encode(list)).flatMap { String(data: $0, encoding: .utf8) }
+        }
+    }
+
+    /// 昇順のしおりページ一覧(存在するページのみ)
+    var bookmarkedPageList: [Int] {
+        bookmarkedPageSet.filter { $0 >= 0 && $0 < resolvedPageCount }.sorted()
+    }
+
+    func isBookmarked(page: Int) -> Bool { bookmarkedPageSet.contains(page) }
+
+    /// 指定ページのしおりをトグルする(付与/解除)
+    func toggleBookmark(page: Int) {
+        var set = bookmarkedPageSet
+        if set.contains(page) { set.remove(page) } else { set.insert(page) }
+        bookmarkedPageSet = set
+    }
+
+    /// 目次(アウトライン)を pageIndex 昇順・同ページ内は作成日時順で返す
+    var sortedOutlines: [NoteOutline] {
+        let all = (outlines as? Set<NoteOutline>) ?? []
+        return all.sorted {
+            if $0.pageIndex != $1.pageIndex { return $0.pageIndex < $1.pageIndex }
+            return ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast)
+        }
+    }
 }

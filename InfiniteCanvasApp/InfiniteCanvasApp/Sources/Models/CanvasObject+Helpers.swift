@@ -20,6 +20,10 @@ extension CanvasObject {
         CanvasObjectKind(rawValue: kind ?? "") ?? .text
     }
 
+    /// 移動・リサイズ・削除・投げ縄操作から保護されているか。
+    /// システムロック(PDF背景など: 完全非対話)とユーザーロック(南京錠・解除可)の両方を含む。
+    var isMovementLocked: Bool { isLocked || isUserLocked }
+
     /// コンテンツ空間(キャンバス座標)でのフレーム
     var contentFrame: CGRect {
         get { CGRect(x: x, y: y, width: width, height: height) }
@@ -49,6 +53,46 @@ extension CanvasObject {
         guard let note = (try? context.fetch(request))?.first,
               !note.isTrashed, !note.isDeleted else { return nil }
         return note
+    }
+
+    /// サムネイル(ライブラリ一覧・ページマネージャー)へこのオブジェクトを簡易描画する。
+    /// コンテキストは既にコンテンツ座標へスケール/平行移動済みである前提。
+    func drawInThumbnail(pageColor: CanvasPageColor) {
+        switch objectKind {
+        case .text:
+            ((text ?? "") as NSString).draw(
+                in: contentFrame.insetBy(dx: 4, dy: 4),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: fontSize > 0 ? fontSize : 24),
+                    .foregroundColor: pageColor.contentUIColor,
+                ]
+            )
+        case .image, .pdf:
+            makeDisplayImage()?.draw(in: contentFrame)
+        case .todo:
+            let path = UIBezierPath(roundedRect: contentFrame, cornerRadius: 10)
+            UIColor.secondarySystemBackground.setFill()
+            path.fill()
+            let lines = todoItems.map { ($0.done ? "☑ " : "☐ ") + $0.text }.joined(separator: "\n")
+            (lines as NSString).draw(
+                in: contentFrame.insetBy(dx: 10, dy: 8),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 15),
+                    .foregroundColor: pageColor.contentUIColor,
+                ]
+            )
+        case .noteLink:
+            let path = UIBezierPath(roundedRect: contentFrame, cornerRadius: 10)
+            UIColor.secondarySystemBackground.setFill()
+            path.fill()
+            ((resolvedLinkedNote?.displayTitle ?? "ノート") as NSString).draw(
+                in: contentFrame.insetBy(dx: 10, dy: 10),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .medium),
+                    .foregroundColor: pageColor.contentUIColor,
+                ]
+            )
+        }
     }
 
     /// 表示用画像を生成する。image は payload をそのまま、pdf は1ページ目をレンダリング。

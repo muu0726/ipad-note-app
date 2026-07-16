@@ -30,6 +30,12 @@ struct NoteCanvasView: View {
     @State private var autoFocusObjectID: NSManagedObjectID?
     @State private var showDeletePageConfirm = false
     @State private var showNoteSettings = false
+    @State private var showPageManager = false
+    @State private var showNavigator = false
+    /// 現在ビューポート中心のページ index(しおりトグル・目次追加の対象)
+    @State private var currentPageIndex = 0
+    /// しおり/目次からのジャンプ要求(CanvasRepresentable が処理後 nil へ戻す)
+    @State private var scrollToPage: Int?
 
     init(
         note: NoteFile,
@@ -77,7 +83,20 @@ struct NoteCanvasView: View {
                     scheduleAutoSave()
                     undoBridge.refresh()  // 描画のたびに戻る/やり直しボタンの状態を更新
                 },
-                onViewportChanged: { session.updateViewport($0, for: note.objectID) },
+                onViewportChanged: { viewport in
+                    session.updateViewport(viewport, for: note.objectID)
+                    // 通常ノートは現在ページを追跡(しおりトグル/目次追加の対象・変化時のみ更新)
+                    if note.canvasNoteType == .paged, geo.size.width > 0 {
+                        let page = PagePlanner.currentPage(
+                            contentOffsetX: viewport.contentOffset.x, viewWidth: geo.size.width,
+                            zoomScale: viewport.zoomScale,
+                            layout: PagedLayoutCalculator(pageCount: note.resolvedPageCount,
+                                                          isTwoPageLayout: note.isTwoPageLayout,
+                                                          isHorizontalScroll: true)
+                        )
+                        if page != currentPageIndex { currentPageIndex = page }
+                    }
+                },
                 onObjectFrameChanged: { id, frame in
                     withObject(id) { object in
                         let previous = object.contentFrame
@@ -151,12 +170,17 @@ struct NoteCanvasView: View {
                 onNoteLinkActivated: { id in
                     openLinkedNote(objectID: id)
                 },
+                onToggleUserLock: { id in toggleUserLock(objectID: id) },
+                onGroupObjects: { ids in groupObjects(ids) },
+                onUngroupObjects: { ids in ungroupObjects(ids) },
                 onAppendPage: { addPage() },
                 onSelectionChanged: { hasSelection in
                     // オブジェクトの選択有無を選択モードへ反映(描画停止・単指操作の切替)
                     toolState.isSelectMode = hasSelection
                 },
-                onCanvasReady: { undoBridge.attach($0) }
+                onCanvasReady: { undoBridge.attach($0) },
+                scrollToPage: scrollToPage,
+                onScrollHandled: { scrollToPage = nil }
             )
             .onChange(of: insertion) { _, request in
                 guard let request else { return }
@@ -183,6 +207,39 @@ struct NoteCanvasView: View {
             if note.canvasNoteType == .paged {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
+                        note.toggleBookmark(page: currentPageIndex)
+                        note.updatedAt = .now
+                        try? context.save()
+                    } label: {
+                        Image(systemName: note.isBookmarked(page: currentPageIndex) ? "bookmark.fill" : "bookmark")
+                    }
+                    .accessibilityIdentifier("bookmark-toggle-button")
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showNavigator = true
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .accessibilityIdentifier("navigator-button")
+                    .popover(isPresented: $showNavigator) {
+                        PageNavigatorView(
+                            note: note,
+                            currentPage: currentPageIndex,
+                            onJump: { page in showNavigator = false; scrollToPage = page }
+                        )
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showPageManager = true
+                    } label: {
+                        Image(systemName: "square.grid.2x2")
+                    }
+                    .accessibilityIdentifier("page-manager-button")
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
                         showNoteSettings.toggle()
                     } label: {
                         Image(systemName: "info.circle")
@@ -193,6 +250,16 @@ struct NoteCanvasView: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented: $showPageManager) {
+            PageManagerView(
+                note: note,
+                drawing: { drawing },
+                objects: { Array(objects) },
+                onReorder: { from, to in applyPagePlan(.reorder(count: note.resolvedPageCount, from: from, to: to)) },
+                onDuplicate: { index in applyPagePlan(.duplicate(count: note.resolvedPageCount, at: index)) },
+                onDelete: { index in applyPagePlan(.delete(count: note.resolvedPageCount, at: index)) }
+            )
         }
         .onAppear {
             // 用紙と同色で見えないペン色になっていたら反転色へ(黒紙で黒ペン等)
@@ -328,6 +395,158 @@ struct NoteCanvasView: View {
         persist()
     }
 
+    // MARK: - ページマネージャー(並び替え・複製・削除)
+
+    /// ページ編集プラン(並び替え/複製/削除)に従って、手書きストローク・オブジェクト・ページ数を
+    /// まとめて再配置する。オブジェクトの移動/削除/複製・描画・ページ数を1つの Undo グループにまとめる。
+    private func applyPagePlan(_ plan: PagePlan) {
+        guard note.canvasNoteType == .paged, plan.oldCount == note.resolvedPageCount else { return }
+        let twoPage = note.isTwoPageLayout
+        let oldLayout = PagedLayoutCalculator(pageCount: plan.oldCount, isTwoPageLayout: twoPage, isHorizontalScroll: true)
+        let newLayout = PagedLayoutCalculator(pageCount: plan.newCount, isTwoPageLayout: twoPage, isHorizontalScroll: true)
+        let manager = undoBridge.activeUndoManager
+
+        // --- オブジェクト: 中心が属するページごとに 複製→移動/削除 を適用 ---
+        for object in Array(objects) where !object.isDeleted {
+            let center = CGPoint(x: object.contentFrame.midX, y: object.contentFrame.midY)
+            guard let page = PagePlanner.pageIndex(of: center, layout: oldLayout) else { continue }
+            // 複製元ページなら、先に複製(元の移動前フレームを基準にコピーを作る)
+            if page == plan.duplicatedSource,
+               let dt = plan.duplicateTranslation(oldLayout: oldLayout, newLayout: newLayout) {
+                duplicateObject(object, offset: dt, manager: manager)
+            }
+            if let t = plan.translation(forOldPage: page, oldLayout: oldLayout, newLayout: newLayout) {
+                if t.dx != 0 || t.dy != 0 {
+                    let previous = object.contentFrame
+                    object.contentFrame = previous.offsetBy(dx: t.dx, dy: t.dy)
+                    object.updatedAt = .now
+                    if let uuid = object.id {
+                        CanvasObjectUndo.registerFrameChange(
+                            objectUUID: uuid, previousFrame: previous,
+                            in: manager, context: context, bridge: undoBridge
+                        )
+                    }
+                }
+            } else {
+                // 削除されるページ上のオブジェクト
+                if let snapshot = CanvasObjectSnapshot(object: object) {
+                    CanvasObjectUndo.registerDelete(
+                        snapshot: snapshot, in: manager, context: context, bridge: undoBridge
+                    )
+                }
+                context.delete(object)
+            }
+        }
+
+        // --- 手書き: ストロークをページごとに 複製→移動/削除 して drawing を作り直す ---
+        let drawingBefore = drawing
+        var newStrokes: [PKStroke] = []
+        for stroke in drawing.strokes {
+            let bounds = stroke.renderBounds
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            guard let page = PagePlanner.pageIndex(of: center, layout: oldLayout) else {
+                newStrokes.append(stroke)  // 用紙外(通常は無い)はそのまま残す
+                continue
+            }
+            if page == plan.duplicatedSource,
+               let dt = plan.duplicateTranslation(oldLayout: oldLayout, newLayout: newLayout) {
+                newStrokes.append(translated(stroke, by: dt))
+            }
+            if let t = plan.translation(forOldPage: page, oldLayout: oldLayout, newLayout: newLayout) {
+                newStrokes.append((t.dx == 0 && t.dy == 0) ? stroke : translated(stroke, by: t))
+            }
+            // translation が nil = 削除ページ → drop
+        }
+        let drawingAfter = PKDrawing(strokes: newStrokes)
+
+        CanvasObjectUndo.registerPageStructureChange(
+            noteID: note.objectID,
+            drawingToRestore: drawingBefore, pageCountToRestore: Int16(plan.oldCount),
+            drawingToReapply: drawingAfter, pageCountToReapply: Int16(plan.newCount),
+            in: manager, context: context, bridge: undoBridge
+        )
+
+        // しおり・目次のページ index も同じ写像で追従させる(Undo は積まない簡易対応)
+        remapNavigation(plan)
+
+        drawing = drawingAfter
+        note.pageCount = Int16(plan.newCount)
+        note.updatedAt = .now
+        persist()
+    }
+
+    /// ページ並び替え/複製/削除に合わせて、しおり・目次のページ index を張り替える。
+    private func remapNavigation(_ plan: PagePlan) {
+        // しおり(集合)
+        var newBookmarks = Set<Int>()
+        let oldBookmarks = note.bookmarkedPageSet
+        for page in oldBookmarks {
+            guard page >= 0, page < plan.oldToNew.count, let mapped = plan.oldToNew[page] else { continue }
+            newBookmarks.insert(mapped)
+        }
+        if let src = plan.duplicatedSource, let dst = plan.duplicatedNewIndex, oldBookmarks.contains(src) {
+            newBookmarks.insert(dst)  // 複製元がしおり付きなら複製先も付ける
+        }
+        if newBookmarks != oldBookmarks { note.bookmarkedPageSet = newBookmarks }
+
+        // 目次(エンティティ)
+        let outlines = (note.outlines as? Set<NoteOutline>) ?? []
+        var duplicates: [(title: String?, page: Int)] = []
+        for outline in outlines {
+            let old = Int(outline.pageIndex)
+            if let src = plan.duplicatedSource, let dst = plan.duplicatedNewIndex, old == src {
+                duplicates.append((outline.title, dst))
+            }
+            guard old >= 0, old < plan.oldToNew.count else { continue }
+            if let mapped = plan.oldToNew[old] {
+                if Int16(mapped) != outline.pageIndex { outline.pageIndex = Int16(mapped) }
+            } else {
+                context.delete(outline)  // 削除ページの目次も消す
+            }
+        }
+        for dup in duplicates {
+            let outline = NoteOutline(context: context)
+            outline.id = UUID()
+            outline.title = dup.title
+            outline.pageIndex = Int16(dup.page)
+            outline.createdAt = .now
+            outline.note = note
+        }
+    }
+
+    /// ストロークを平行移動した複製(mask も引き継ぐ)
+    private func translated(_ s: PKStroke, by v: CGVector) -> PKStroke {
+        PKStroke(
+            ink: s.ink, path: s.path,
+            transform: s.transform.concatenating(CGAffineTransform(translationX: v.dx, y: v.dy)),
+            mask: s.mask
+        )
+    }
+
+    /// オブジェクトを平行移動した位置へ複製し、追加を Undo に登録する。
+    private func duplicateObject(_ src: CanvasObject, offset: CGVector, manager: UndoManager?) {
+        let copy = CanvasObject(context: context)
+        copy.id = UUID()
+        copy.kind = src.kind
+        copy.text = src.text
+        copy.fontSize = src.fontSize
+        copy.payload = src.payload
+        copy.linkedNoteUUID = src.linkedNoteUUID
+        copy.isLocked = src.isLocked
+        copy.zOrder = src.zOrder
+        copy.contentFrame = src.contentFrame.offsetBy(dx: offset.dx, dy: offset.dy)
+        copy.createdAt = .now
+        copy.updatedAt = .now
+        copy.note = note
+        // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる
+        try? context.obtainPermanentIDs(for: [copy])
+        if let uuid = copy.id {
+            CanvasObjectUndo.registerInsert(
+                objectUUID: uuid, in: manager, context: context, bridge: undoBridge
+            )
+        }
+    }
+
     // MARK: - ノートリンクのジャンプ
 
     /// ノートリンクのダブルタップ → リンク先ノートをタブで開く(既存タブなら切替)。
@@ -344,7 +563,7 @@ struct NoteCanvasView: View {
     /// 投げ縄で移動したインク領域に中心があるオブジェクトを、同じ差分だけ平行移動する。
     /// ロック(PDF背景など)は対象外。Undo はインク移動と同一グループにまとまる。
     private func moveObjectsWithLasso(in region: CGRect, by delta: CGVector) {
-        for object in objects where !object.isDeleted && !object.isLocked
+        for object in objects where !object.isDeleted && !object.isMovementLocked
         && region.contains(CGPoint(x: object.contentFrame.midX, y: object.contentFrame.midY)) {
             let previous = object.contentFrame
             object.contentFrame = previous.offsetBy(dx: delta.dx, dy: delta.dy)
@@ -359,9 +578,42 @@ struct NoteCanvasView: View {
         scheduleAutoSave()
     }
 
+    /// オブジェクトのユーザーロックをトグルする(即時保存して南京錠表示に反映)
+    private func toggleUserLock(objectID: NSManagedObjectID) {
+        guard let object = (try? context.existingObject(with: objectID)) as? CanvasObject else { return }
+        onActivate()
+        object.isUserLocked.toggle()
+        object.updatedAt = .now
+        persist()
+    }
+
+    /// 選択中の複数オブジェクトへ共通の parentGroupID を付与してグループ化する(Undo なし・即時保存)
+    private func groupObjects(_ ids: [NSManagedObjectID]) {
+        guard ids.count >= 2 else { return }
+        onActivate()
+        let groupID = UUID()
+        for id in ids {
+            guard let object = (try? context.existingObject(with: id)) as? CanvasObject else { continue }
+            object.parentGroupID = groupID
+            object.updatedAt = .now
+        }
+        persist()
+    }
+
+    /// グループを解除する(渡された全 ID の parentGroupID を消す)
+    private func ungroupObjects(_ ids: [NSManagedObjectID]) {
+        onActivate()
+        for id in ids {
+            guard let object = (try? context.existingObject(with: id)) as? CanvasObject else { continue }
+            object.parentGroupID = nil
+            object.updatedAt = .now
+        }
+        persist()
+    }
+
     /// 投げ縄で削除したインク領域に中心があるオブジェクトも削除する(ロックは対象外)。
     private func deleteObjectsWithLasso(in region: CGRect) {
-        for object in objects where !object.isDeleted && !object.isLocked
+        for object in objects where !object.isDeleted && !object.isMovementLocked
         && region.contains(CGPoint(x: object.contentFrame.midX, y: object.contentFrame.midY)) {
             if let snapshot = CanvasObjectSnapshot(object: object) {
                 CanvasObjectUndo.registerDelete(
@@ -504,53 +756,22 @@ struct NoteCanvasView: View {
         let scale = min(1, 480 / max(target.width, target.height))
         let size = CGSize(width: target.width * scale, height: target.height * scale)
         let pageColor = note.canvasPageColor
+        // 蛍光ペンは前面 drawing では不可視(alpha 0)なので、背面ミラー相当を復元して
+        // オブジェクトの「下」に敷き、キャンバスと同じ重なり順で合成する。
+        let markerDrawing = MarkerLayer.backingDrawing(from: drawing)
         let image = UIGraphicsImageRenderer(size: size).image { ctx in
             pageColor.backgroundUIColor.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
             ctx.cgContext.scaleBy(x: scale, y: scale)
             ctx.cgContext.translateBy(x: -target.minX, y: -target.minY)
-            for object in objects where !object.isDeleted {
-                switch object.objectKind {
-                case .text:
-                    ((object.text ?? "") as NSString).draw(
-                        in: object.contentFrame.insetBy(dx: 4, dy: 4),
-                        withAttributes: [
-                            .font: UIFont.systemFont(
-                                ofSize: object.fontSize > 0 ? object.fontSize : 24
-                            ),
-                            .foregroundColor: pageColor.contentUIColor,
-                        ]
-                    )
-                case .image, .pdf:
-                    object.makeDisplayImage()?.draw(in: object.contentFrame)
-                case .todo:
-                    // サムネイルでは項目テキストを角丸カード上に簡易描画
-                    let path = UIBezierPath(roundedRect: object.contentFrame, cornerRadius: 10)
-                    UIColor.secondarySystemBackground.setFill()
-                    path.fill()
-                    let lines = object.todoItems
-                        .map { ($0.done ? "☑ " : "☐ ") + $0.text }
-                        .joined(separator: "\n")
-                    (lines as NSString).draw(
-                        in: object.contentFrame.insetBy(dx: 10, dy: 8),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 15),
-                            .foregroundColor: pageColor.contentUIColor,
-                        ]
-                    )
-                case .noteLink:
-                    // サムネイルではリンクカードを角丸の淡い矩形として簡易描画
-                    let path = UIBezierPath(roundedRect: object.contentFrame, cornerRadius: 10)
-                    UIColor.secondarySystemBackground.setFill()
-                    path.fill()
-                    ((object.resolvedLinkedNote?.displayTitle ?? "ノート") as NSString).draw(
-                        in: object.contentFrame.insetBy(dx: 10, dy: 10),
-                        withAttributes: [
-                            .font: UIFont.systemFont(ofSize: 16, weight: .medium),
-                            .foregroundColor: pageColor.contentUIColor,
-                        ]
-                    )
+            // 1) 蛍光ペン(背面) → 2) オブジェクト → 3) 前面インク(ペン等)の順で重ねる
+            if !markerDrawing.strokes.isEmpty {
+                UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                    markerDrawing.image(from: target, scale: scale).draw(in: target)
                 }
+            }
+            for object in objects where !object.isDeleted {
+                object.drawInThumbnail(pageColor: pageColor)
             }
             // キャンバスと同様、ダークモードでのインク色自動反転を避けて描き出す
             UITraitCollection(userInterfaceStyle: .light).performAsCurrent {

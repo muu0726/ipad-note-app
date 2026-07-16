@@ -120,27 +120,53 @@ final class DragDropUITests: XCTestCase {
 
         let anyNote = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'grid-note-'")).firstMatch
-        let sidebarFolder = app.cells
+        var sidebarFolder = app.cells
             .containing(NSPredicate(format: "identifier BEGINSWITH 'sidebar-folder-'")).firstMatch
         try XCTSkipUnless(anyNote.waitForExistence(timeout: 5) && sidebarFolder.exists,
                           "ルートにノートとサイドバーのフォルダ行が必要")
+
+        // Portrait では NavigationSplitView のサイドバーがオーバーレイ表示で畳まれており、
+        // 要素はヒエラルキー上 exists でも実際にはタップ・ドロップを受け付けない
+        // (isHittable == false)ことがある。ナビバーのトグルで明示的に展開してから使う。
+        if !sidebarFolder.isHittable {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            sidebarFolder = app.cells
+                .containing(NSPredicate(format: "identifier BEGINSWITH 'sidebar-folder-'")).firstMatch
+            XCTAssertTrue(sidebarFolder.waitForExistence(timeout: 3) && sidebarFolder.isHittable,
+                          "サイドバーのフォルダ行を展開できない")
+        }
 
         let noteID = anyNote.identifier
 
         // ノートをサイドバーのフォルダ行へドラッグ&ドロップ
         anyNote.press(forDuration: 1.2, thenDragTo: sidebarFolder,
                       withVelocity: .slow, thenHoldForDuration: 0.8)
+
+        // ドロップ成功時、FolderTreeNode 側の仕様(41行目 `if moved { isExpanded = true }` と
+        // それに連動する `selection = .folder(folder)`)により、詳細ペインは移動先フォルダの
+        // 中身へ自動的に切り替わる。そのため同じ識別子のノートは「ルートではなく移動先フォルダの
+        // 中」に存在し続ける。まずは移動先フォルダの中に現れたことを確認してから、
+        // 明示的にルート(すべてのノート)へ戻ってそこには居ないことを確認する。
+        let movedNote = app.descendants(matching: .any).matching(identifier: noteID).firstMatch
+        XCTAssertTrue(movedNote.waitForExistence(timeout: 8), "移動先フォルダの中にノートが見つからない")
+
+        let allNotesRow = app.cells
+            .containing(NSPredicate(format: "identifier == 'sidebar-all-notes'")).firstMatch
+        XCTAssertTrue(allNotesRow.waitForExistence(timeout: 5) && allNotesRow.isHittable,
+                      "サイドバーの「すべてのノート」が操作できない")
+        allNotesRow.tap()
+
         let noteInRoot = app.descendants(matching: .any).matching(identifier: noteID).firstMatch
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: noteInRoot)
         waitForExpectations(timeout: 8)
 
-        // 後始末: サイドバーの「すべてのノート」へ戻す(フォルダ行ドロップで自動展開済み)
-        let movedNote = app.cells
-            .containing(NSPredicate(format: "identifier == '\(noteID)'")).firstMatch
-        let allNotesRow = app.cells
-            .containing(NSPredicate(format: "identifier == 'sidebar-all-notes'")).firstMatch
-        if movedNote.waitForExistence(timeout: 3), allNotesRow.isHittable {
-            movedNote.press(forDuration: 1.2, thenDragTo: allNotesRow,
+        // 後始末: 同じサイドバーのフォルダ行を再度開き、ノートを「すべてのノート」へ戻す
+        if sidebarFolder.waitForExistence(timeout: 3), sidebarFolder.isHittable {
+            sidebarFolder.tap()
+        }
+        let movedNoteAgain = app.descendants(matching: .any).matching(identifier: noteID).firstMatch
+        if movedNoteAgain.waitForExistence(timeout: 3), allNotesRow.isHittable {
+            movedNoteAgain.press(forDuration: 1.2, thenDragTo: allNotesRow,
                             withVelocity: .slow, thenHoldForDuration: 0.8)
         }
     }

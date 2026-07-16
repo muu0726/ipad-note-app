@@ -65,6 +65,24 @@ struct LassoObjectSyncTests {
         let after = PKDrawing(strokes: [a, stroke(at: CGPoint(x: 500, y: 500))])
         #expect(LassoObjectSync.detect(from: before, to: after) == nil)
     }
+
+    @Test("同一外接矩形のストロークが複数あっても片方の削除を検知する(回帰防止)")
+    func detectsDeleteAmongDuplicateBounds() {
+        // renderBounds が完全に一致する2本のストローク(例: ×印の対角線2本を想定)を用意し、
+        // 片方だけ削除する。Set の contains 判定(修正前)だと、もう1本が同キーで
+        // 生き残っているため削除自体を見逃してしまっていた。
+        let a1 = stroke(at: CGPoint(x: 100, y: 100))
+        let a2 = stroke(at: CGPoint(x: 100, y: 100))  // a1 と同じ renderBounds
+        let b = stroke(at: CGPoint(x: 400, y: 400))
+        let before = PKDrawing(strokes: [a1, a2, b])
+        let after = PKDrawing(strokes: [a2, b])  // a1 のみ削除、a2(同じ外接矩形)は残す
+
+        guard case .deleted(let region) = LassoObjectSync.detect(from: before, to: after) else {
+            Issue.record("同一外接矩形のストロークが残っているために削除が検知されなかった")
+            return
+        }
+        #expect(region.midX > 90 && region.midX < 160)
+    }
 }
 
 // MARK: - PDF 背景インポート
@@ -102,9 +120,15 @@ struct PDFImportTests {
             #expect(object.isLocked)               // 移動・削除不可
             #expect(object.payload != nil)         // レンダリング画像を保持
         }
-        // 各ページのY座標範囲へロック配置されている
+        // 各ページの矩形へロック配置されている。
+        // 通常ノートは横スクロール固定(NoteCanvasView.swift の isHorizontalScroll 強制)なので、
+        // 表示時のページ配置は PagedLayoutCalculator(isHorizontalScroll: true) の横並び矩形になる
+        // (PageMetrics.pageRect は縦一列の別レイアウト用で、この検証には使えない)。
+        let layout = PagedLayoutCalculator(pageCount: 3, isTwoPageLayout: false, isHorizontalScroll: true)
         for (index, object) in objects.enumerated() {
-            #expect(abs(object.contentFrame.minY - PageMetrics.pageRect(index).minY) < 0.5)
+            let expected = layout.pageRect(index)
+            #expect(abs(object.contentFrame.minX - expected.minX) < 0.5)
+            #expect(abs(object.contentFrame.minY - expected.minY) < 0.5)
             #expect(object.contentFrame.width == PageMetrics.width)
         }
     }
@@ -403,5 +427,208 @@ struct OpenNotesSessionTests {
         #expect(restored.openNotes == [b, a])
         #expect(restored.selectedNote == a)
         #expect(restored.isCanvasVisible)
+    }
+}
+
+// MARK: - 蛍光ペンの背面回り込み(前面=不可視 / 背面=復元)
+
+@Suite("蛍光ペンの背面レイヤー分離")
+struct MarkerLayerTests {
+
+    /// 指定インク種別・色の短いストローク
+    private func stroke(_ inkType: PKInk.InkType, color: UIColor) -> PKStroke {
+        let points = (0...5).map { i -> PKStrokePoint in
+            PKStrokePoint(
+                location: CGPoint(x: CGFloat(i) * 4, y: 0),
+                timeOffset: TimeInterval(i) * 0.01,
+                size: CGSize(width: 3, height: 3), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2
+            )
+        }
+        return PKStroke(ink: PKInk(inkType, color: color),
+                        path: PKStrokePath(controlPoints: points, creationDate: Date()))
+    }
+
+    private func alpha(_ color: UIColor) -> CGFloat {
+        var a: CGFloat = 0
+        color.getRed(nil, green: nil, blue: nil, alpha: &a)
+        return a
+    }
+
+    @Test("背面ミラーはマーカーだけを抽出し不透明度を復元する")
+    func backingExtractsMarkersWithRestoredAlpha() {
+        let pen = stroke(.pen, color: .black)
+        let marker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(0))  // 前面では不可視
+        let full = PKDrawing(strokes: [pen, marker])
+
+        let backing = MarkerLayer.backingDrawing(from: full)
+
+        #expect(backing.strokes.count == 1)  // ペンは含めない
+        #expect(backing.strokes.first?.ink.inkType == .marker)
+        // 不透明度は markerAlpha に復元される
+        let restored = alpha(backing.strokes.first!.ink.color)
+        #expect(abs(restored - PenToolState.markerAlpha) < 0.001)
+    }
+
+    @Test("hidden はマーカーを alpha 0 にしつつ種別を保つ")
+    func hiddenZeroesAlphaKeepsType() {
+        let marker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(PenToolState.markerAlpha))
+        let hidden = MarkerLayer.hidden(marker)
+        #expect(hidden.ink.inkType == .marker)
+        #expect(alpha(hidden.ink.color) < 0.001)
+    }
+
+    @Test("isVisibleMarker は描き立てのマーカーだけ true")
+    func isVisibleMarkerDetection() {
+        let freshMarker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(PenToolState.markerAlpha))
+        let hiddenMarker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(0))
+        let pen = stroke(.pen, color: .black)
+        #expect(MarkerLayer.isVisibleMarker(freshMarker))
+        #expect(!MarkerLayer.isVisibleMarker(hiddenMarker))  // 既に背面化済み
+        #expect(!MarkerLayer.isVisibleMarker(pen))           // ペンは対象外
+    }
+}
+
+// MARK: - ページ並び替え・複製・削除の座標再割り当て
+
+@Suite("ページ編集プラン")
+struct PagePlanTests {
+    /// 通常ノートの標準(横スクロール・1ページ)。ページピッチ = 幅800 + gap20 = 820(X方向)
+    private func layout(_ count: Int) -> PagedLayoutCalculator {
+        PagedLayoutCalculator(pageCount: count, isTwoPageLayout: false, isHorizontalScroll: true)
+    }
+
+    @Test("並び替え: 先頭を末尾へ移すと写像が回転する")
+    func reorderMapping() {
+        let plan = PagePlan.reorder(count: 3, from: 0, to: 2)
+        // 0→2, 1→0, 2→1
+        #expect(plan.oldToNew == [2, 0, 1])
+        #expect(plan.newCount == 3)
+    }
+
+    @Test("並び替え: 隣接ページの内容がページピッチぶん平行移動する")
+    func reorderTranslation() {
+        let plan = PagePlan.reorder(count: 2, from: 0, to: 1)  // ページ0と1を入れ替え
+        let old = layout(2), new = layout(2)
+        let t0 = plan.translation(forOldPage: 0, oldLayout: old, newLayout: new)
+        let t1 = plan.translation(forOldPage: 1, oldLayout: old, newLayout: new)
+        // ピッチ = 800 + 20 = 820。0は右へ+820、1は左へ-820。
+        #expect(t0 == CGVector(dx: 820, dy: 0))
+        #expect(t1 == CGVector(dx: -820, dy: 0))
+    }
+
+    @Test("削除: 対象ページは破棄、後続は1つ前へ詰める")
+    func deleteMapping() {
+        let plan = PagePlan.delete(count: 3, at: 1)
+        #expect(plan.oldToNew == [0, nil, 1])   // 1は破棄、2は1へ
+        #expect(plan.newCount == 2)
+        let old = layout(3), new = layout(2)
+        #expect(plan.translation(forOldPage: 1, oldLayout: old, newLayout: new) == nil)  // 破棄
+        // 旧ページ2(x=1640)は新ページ1(x=820)へ → -820
+        #expect(plan.translation(forOldPage: 2, oldLayout: old, newLayout: new) == CGVector(dx: -820, dy: 0))
+    }
+
+    @Test("複製: 後続を後ろへずらし、複製先の平行移動を出す")
+    func duplicateMapping() {
+        let plan = PagePlan.duplicate(count: 2, at: 0)   // ページ0を複製し index1へ挿入
+        #expect(plan.oldToNew == [0, 2])                 // 旧1は新2へ
+        #expect(plan.newCount == 3)
+        #expect(plan.duplicatedSource == 0)
+        #expect(plan.duplicatedNewIndex == 1)
+        let old = layout(2), new = layout(3)
+        // 複製元ページ0(x=0)の内容を複製先ページ1(x=820)へ → +820
+        #expect(plan.duplicateTranslation(oldLayout: old, newLayout: new) == CGVector(dx: 820, dy: 0))
+        // 旧1(x=820)は新2(x=1640)へ → +820
+        #expect(plan.translation(forOldPage: 1, oldLayout: old, newLayout: new) == CGVector(dx: 820, dy: 0))
+        // 旧0はそのまま(x=0→x=0)
+        #expect(plan.translation(forOldPage: 0, oldLayout: old, newLayout: new) == CGVector(dx: 0, dy: 0))
+    }
+
+    @Test("点が属するページを判定する")
+    func pageIndexOfPoint() {
+        let l = layout(3)
+        // ページ0: x[0,800], ページ1: x[820,1620], ページ2: x[1640,2440]、いずれも y[0,1130]
+        #expect(PagePlanner.pageIndex(of: CGPoint(x: 400, y: 500), layout: l) == 0)
+        #expect(PagePlanner.pageIndex(of: CGPoint(x: 1000, y: 500), layout: l) == 1)
+        #expect(PagePlanner.pageIndex(of: CGPoint(x: 2000, y: 500), layout: l) == 2)
+        // ページ間のグレー余白(x=810)はどのページにも属さない
+        #expect(PagePlanner.pageIndex(of: CGPoint(x: 810, y: 500), layout: l) == nil)
+    }
+
+    @Test("ビューポート中心から現在ページを判定する")
+    func currentPageFromViewport() {
+        let l = layout(3)   // page midX: 400, 1230, 2050
+        // 先頭表示(offset 0, 幅800, 等倍)→ 中心 x=400 → ページ0
+        #expect(PagePlanner.currentPage(contentOffsetX: 0, viewWidth: 800, zoomScale: 1, layout: l) == 0)
+        // ページ1を中央に(中心 x=1230 になる offset=830)→ ページ1
+        #expect(PagePlanner.currentPage(contentOffsetX: 830, viewWidth: 800, zoomScale: 1, layout: l) == 1)
+        // ページ2付近
+        #expect(PagePlanner.currentPage(contentOffsetX: 1650, viewWidth: 800, zoomScale: 1, layout: l) == 2)
+    }
+
+    @Test("ページ先頭へのスクロール offset を計算する")
+    func scrollOffsetForPage() {
+        let l = layout(3)
+        // ページ1(minX=820)先頭へ、余白24 → 820 - 24 = 796
+        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 1, layout: l, margin: 24) == 796)
+        // ズーム2倍なら (820*2) - 24 = 1616
+        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 2, layout: l, margin: 24) == 1616)
+    }
+}
+
+// MARK: - ページサムネイル生成(ページ範囲の切り出し)
+
+@Suite("ページサムネイル生成")
+struct PageThumbnailRendererTests {
+    /// 指定範囲を横切る太い黒ストローク
+    private func stroke(from: CGPoint, to: CGPoint) -> PKStroke {
+        let n = 12
+        let points = (0...n).map { i -> PKStrokePoint in
+            let t = CGFloat(i) / CGFloat(n)
+            return PKStrokePoint(
+                location: CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t),
+                timeOffset: TimeInterval(i) * 0.01,
+                size: CGSize(width: 12, height: 12), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2
+            )
+        }
+        return PKStroke(ink: PKInk(.pen, color: .black),
+                        path: PKStrokePath(controlPoints: points, creationDate: Date()))
+    }
+
+    /// 画像の内側に「白背景でない(=描画された)」暗いピクセルが存在するか。
+    /// 端1pxのスケーリング縁アーティファクトを避けるため外周は走査しない。
+    private func hasInk(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage else { return false }
+        let w = cg.width, h = cg.height
+        var pixels = [UInt8](repeating: 255, count: w * h * 4)  // 白で初期化(透明→黒化を防ぐ)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let margin = 2
+        var darkCount = 0
+        for y in margin..<(h - margin) {
+            for x in margin..<(w - margin) {
+                let i = (y * w + x) * 4
+                if Int(pixels[i]) + Int(pixels[i + 1]) + Int(pixels[i + 2]) < 300 { darkCount += 1 }
+            }
+        }
+        return darkCount > 30   // ノイズ数点では反応しない
+    }
+
+    @Test("ページ範囲内のストロークはサムネイルに写り、範囲外は写らない")
+    func cropsToPageRect() {
+        let layout = PagedLayoutCalculator(pageCount: 2, isTwoPageLayout: false, isHorizontalScroll: true)
+        // ページ0(x[0,800]) の内側に黒線を引く
+        let drawing = PKDrawing(strokes: [stroke(from: CGPoint(x: 100, y: 200), to: CGPoint(x: 700, y: 900))])
+
+        let page0 = PageThumbnailRenderer.render(
+            pageRect: layout.pageRect(0), drawing: drawing, objects: [], pageColor: .white
+        )
+        let page1 = PageThumbnailRenderer.render(
+            pageRect: layout.pageRect(1), drawing: drawing, objects: [], pageColor: .white
+        )
+        #expect(hasInk(page0))    // ページ0にはインクが写る
+        #expect(!hasInk(page1))   // ページ1(x[820,1620])には写らない
     }
 }

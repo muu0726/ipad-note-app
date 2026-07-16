@@ -13,15 +13,38 @@ enum LassoChange: Equatable {
 enum LassoObjectSync {
 
     static func detect(from old: PKDrawing, to new: PKDrawing) -> LassoChange? {
-        // ストローク境界を丸めたキーで「変化していないストローク」を突き合わせる
+        // ストローク境界を丸めたキーで「変化していないストローク」を突き合わせる。
+        // Set の contains 判定だと、同じ外接矩形を持つストロークが複数存在する場合
+        // (例: 同じ外接矩形になる×印の対角線2本)、片方だけ削除しても「同キーの
+        // 生き残りがある」ことをもって削除を見逃してしまう。多重集合(キーごとの
+        // 残数)として突き合わせ、ストローク単位で正しく対応付ける。
         func key(_ rect: CGRect) -> String {
             "\(Int(rect.minX))_\(Int(rect.minY))_\(Int(rect.width))_\(Int(rect.height))"
         }
-        let newKeys = Set(new.strokes.map { key($0.renderBounds) })
-        let oldKeys = Set(old.strokes.map { key($0.renderBounds) })
-        // old にしか無い = 移動元 or 削除 / new にしか無い = 移動先 or 追加
-        let removed = old.strokes.filter { !newKeys.contains(key($0.renderBounds)) }
-        let added = new.strokes.filter { !oldKeys.contains(key($0.renderBounds)) }
+        var newKeyCounts = new.strokes.reduce(into: [String: Int]()) { counts, stroke in
+            counts[key(stroke.renderBounds), default: 0] += 1
+        }
+        // old にしか無い = 移動元 or 削除
+        let removed = old.strokes.filter { stroke in
+            let k = key(stroke.renderBounds)
+            if let count = newKeyCounts[k], count > 0 {
+                newKeyCounts[k] = count - 1
+                return false
+            }
+            return true
+        }
+        var oldKeyCounts = old.strokes.reduce(into: [String: Int]()) { counts, stroke in
+            counts[key(stroke.renderBounds), default: 0] += 1
+        }
+        // new にしか無い = 移動先 or 追加
+        let added = new.strokes.filter { stroke in
+            let k = key(stroke.renderBounds)
+            if let count = oldKeyCounts[k], count > 0 {
+                oldKeyCounts[k] = count - 1
+                return false
+            }
+            return true
+        }
         guard !removed.isEmpty else { return nil }
 
         let removedRegion = removed.reduce(CGRect.null) { $0.union($1.renderBounds) }

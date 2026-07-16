@@ -52,6 +52,13 @@ struct PenToolbarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, isCollapsed ? 0 : 6)
         .background(.bar)
+        // ツール切替のたびにカスタムカラーピッカーの表示を今のツールの色へ同期する。
+        // (customColor はローカル @State のため、切替なしだと前のツールで選んだ色が
+        //  表示に残り、選び直しても toolState.currentColor と一致して onChange が
+        //  発火せず反映されないことがあった)
+        .onChange(of: toolState.tool) { _, _ in
+            customColor = Color(uiColor: toolState.currentColor)
+        }
     }
 
     private var barDivider: some View {
@@ -249,6 +256,8 @@ struct PenToolbarView: View {
             ForEach(Array(toolState.palette.enumerated()), id: \.offset) { _, color in
                 Button {
                     toolState.setColor(color)
+                    // カスタムカラーピッカーの表示も同期(次に開いたときに実際の色を示す)
+                    customColor = Color(uiColor: color)
                 } label: {
                     Circle()
                         .fill(Color(uiColor: color))

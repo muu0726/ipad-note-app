@@ -11,9 +11,13 @@ struct CanvasTabsView: View {
     @Environment(\.managedObjectContext) private var context
     @StateObject private var toolState = PenToolState()
     @StateObject private var undoBridge = CanvasUndoBridge()
-    // 分割時は左右それぞれ独立した Undo 履歴を持つ(互いに干渉しない)
+    // 分割時は左右それぞれ独立した Undo 履歴・ペン状態(色/太さ/ツール種別)を持つ
+    // (互いに干渉しない。以前は toolState を左右で共有しており、片側の色変更が
+    //  もう片側にも反映されてしまうバグがあった)
     @StateObject private var leftUndoBridge = CanvasUndoBridge()
     @StateObject private var rightUndoBridge = CanvasUndoBridge()
+    @StateObject private var leftToolState = PenToolState()
+    @StateObject private var rightToolState = PenToolState()
     @State private var leftInsertion: ObjectInsertion?
     @State private var rightInsertion: ObjectInsertion?
     @State private var isToolbarCollapsed = false
@@ -32,7 +36,7 @@ struct CanvasTabsView: View {
     var body: some View {
         VStack(spacing: 0) {
             PenToolbarView(
-                toolState: toolState,
+                toolState: activeToolState,
                 undoBridge: activeUndoBridge,
                 isCollapsed: $isToolbarCollapsed,
                 onInsertText: { setActiveInsertion(.text) },
@@ -137,7 +141,7 @@ struct CanvasTabsView: View {
             let leftWidth = available * session.splitDividerRatio
             HStack(spacing: 0) {
                 splitPane(note: left, side: .left,
-                          bridge: leftUndoBridge, insertion: $leftInsertion)
+                          bridge: leftUndoBridge, toolState: leftToolState, insertion: $leftInsertion)
                     .frame(width: leftWidth)
                 SplitDividerHandle(
                     ratio: $session.splitDividerRatio,
@@ -145,7 +149,7 @@ struct CanvasTabsView: View {
                     handleWidth: handleWidth
                 )
                 splitPane(note: right, side: .right,
-                          bridge: rightUndoBridge, insertion: $rightInsertion)
+                          bridge: rightUndoBridge, toolState: rightToolState, insertion: $rightInsertion)
                     .frame(width: max(0, available - leftWidth))
             }
         }
@@ -154,7 +158,7 @@ struct CanvasTabsView: View {
     /// 分割の片側。アクティブ側は上端にアクセントバーを出し、タップでアクティブ切替。
     private func splitPane(
         note: NoteFile, side: SplitSide,
-        bridge: CanvasUndoBridge, insertion: Binding<ObjectInsertion?>
+        bridge: CanvasUndoBridge, toolState: PenToolState, insertion: Binding<ObjectInsertion?>
     ) -> some View {
         let isActive = session.activeSide == side
         return NoteCanvasView(
@@ -178,11 +182,13 @@ struct CanvasTabsView: View {
         .accessibilityIdentifier(side == .left ? "split-pane-left" : "split-pane-right")
     }
 
-    /// 指定側をアクティブにする(選択テキスト情報は持ち越さない)。
+    /// 指定側をアクティブにする(選択テキスト情報・選択モードは持ち越さない)。
     private func activate(_ side: SplitSide) {
         guard session.isSplitActive else { return }
         if session.activeSide != side {
-            toolState.selectedTextObject = nil
+            let state = toolState(for: side)
+            state.selectedTextObject = nil
+            state.isSelectMode = false
         }
         session.activateSide(side)
     }
@@ -191,6 +197,16 @@ struct CanvasTabsView: View {
     private var activeUndoBridge: CanvasUndoBridge {
         guard session.isSplitActive else { return undoBridge }
         return session.activeSide == .left ? leftUndoBridge : rightUndoBridge
+    }
+
+    /// ツールバーが作用するペン状態(色・太さ・ツール種別。分割時はアクティブ側)
+    private var activeToolState: PenToolState {
+        guard session.isSplitActive else { return toolState }
+        return toolState(for: session.activeSide)
+    }
+
+    private func toolState(for side: SplitSide) -> PenToolState {
+        side == .left ? leftToolState : rightToolState
     }
 
     /// オブジェクト挿入をアクティブ側のキャンバスへ振り分ける
@@ -253,7 +269,7 @@ struct CanvasTabsView: View {
     /// 選択中テキストのフォントサイズを変更し、Core Data 保存 + Undo 登録する。
     /// 高さの自動調整はオブジェクトビューが検知して追従・保存する。
     private func changeSelectedTextFontSize(to newSize: CGFloat) {
-        guard var selection = toolState.selectedTextObject,
+        guard var selection = activeToolState.selectedTextObject,
               let object = (try? context.existingObject(with: selection.objectID)) as? CanvasObject,
               let uuid = object.id else { return }
         let clamped = min(max(newSize, PenToolState.fontSizeRange.lowerBound),
@@ -271,7 +287,7 @@ struct CanvasTabsView: View {
 
         // ツールバー表示を即時更新
         selection.fontSize = clamped
-        toolState.selectedTextObject = selection
+        activeToolState.selectedTextObject = selection
     }
 }
 

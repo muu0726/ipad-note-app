@@ -1,10 +1,12 @@
 import CoreData
 import PDFKit
 import UIKit
+import OSLog
 
 /// フォルダ・ノートに対する操作(作成 / 名前変更 / 移動 / ゴミ箱 / 完全削除)を集約。
 /// すべて viewContext 上で同期実行し、最後に保存する。
 enum LibraryService {
+    private static let logger = Logger(subsystem: "com.muu0726.InfiniteCanvasApp", category: "LibraryService")
 
     // MARK: - 作成
 
@@ -128,11 +130,15 @@ enum LibraryService {
     static func move(_ item: LibraryItem, to destination: Folder?, in context: NSManagedObjectContext) {
         switch item {
         case .folder(let folder):
+            // 既に同じ場所にある場合は no-op(updatedAt を無意味に更新しない)
+            if folder.parent == destination { return }
             // 自分自身・自分の子孫への移動は循環参照になるため禁止
             if let destination, destination == folder || destination.isDescendant(of: folder) { return }
             folder.parent = destination
             folder.updatedAt = .now
         case .note(let note):
+            // 既に同じ場所にある場合は no-op(updatedAt を無意味に更新しない)
+            if note.folder == destination { return }
             note.folder = destination
             note.updatedAt = .now
         }
@@ -218,6 +224,9 @@ enum LibraryService {
             try context.save()
         } catch {
             context.rollback()
+            // assertionFailure は Release ビルドでは no-op になり本番では何も残らないため、
+            // 統合ログ(os.Logger)にも必ず記録する(Console.app / sysdiagnose で追跡可能)。
+            logger.error("Core Data の保存に失敗: \(error.localizedDescription, privacy: .public)")
             assertionFailure("Core Data の保存に失敗: \(error)")
         }
     }

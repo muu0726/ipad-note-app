@@ -77,10 +77,14 @@ struct GraphWebView: UIViewRepresentable {
         }
 
         private func pushSearch(_ term: String) {
+            // JS 文字列リテラル内では未エスケープの改行系文字(LF/CR)が構文エラーになる。
+            // \n だけでなく \r(古い改行コードやペーストで混入しうる)も置換する。
             let escaped = term
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\r\n", with: " ")
                 .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
             webView?.evaluateJavaScript("setSearch(\"\(escaped)\");", completionHandler: nil)
         }
 

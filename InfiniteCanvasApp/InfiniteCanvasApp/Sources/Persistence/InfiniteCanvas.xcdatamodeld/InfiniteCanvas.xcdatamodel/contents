@@ -6,8 +6,10 @@
         <attribute name="height" optional="YES" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="isLocked" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="isUserLocked" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="kind" optional="YES" attributeType="String" defaultValueString="text"/>
         <attribute name="linkedNoteUUID" optional="YES" attributeType="String"/>
+        <attribute name="parentGroupID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="payload" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="text" optional="YES" attributeType="String"/>
         <attribute name="updatedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
@@ -31,6 +33,7 @@
     </entity>
     <entity name="NoteFile" representedClassName="NoteFile" syncable="YES" codeGenerationType="class">
         <attribute name="backgroundStyle" optional="YES" attributeType="String" defaultValueString="blank"/>
+        <attribute name="bookmarkedPages" optional="YES" attributeType="String"/>
         <attribute name="canvasData" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
@@ -46,5 +49,13 @@
         <attribute name="updatedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <relationship name="folder" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Folder" inverseName="notes" inverseEntity="Folder"/>
         <relationship name="objects" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="CanvasObject" inverseName="note" inverseEntity="CanvasObject"/>
+        <relationship name="outlines" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="NoteOutline" inverseName="note" inverseEntity="NoteOutline"/>
+    </entity>
+    <entity name="NoteOutline" representedClassName="NoteOutline" syncable="YES" codeGenerationType="class">
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="pageIndex" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="title" optional="YES" attributeType="String"/>
+        <relationship name="note" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="NoteFile" inverseName="outlines" inverseEntity="NoteFile"/>
     </entity>
 </model>

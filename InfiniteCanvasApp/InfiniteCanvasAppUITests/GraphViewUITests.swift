@@ -45,6 +45,21 @@ final class GraphViewUITests: XCTestCase {
             graphEntry = app.cells
                 .containing(NSPredicate(format: "identifier == 'sidebar-graph'")).firstMatch
         }
+        // グラフビューはサイドバーの「ライブラリ」セクション(可変長のフォルダ/ノート一覧)の
+        // 下に固定配置されている。クローンシミュレーターに蓄積した大量のフォルダ/ノートで
+        // リストが伸びていると、遅延生成される List のセルとしてまだ存在せず
+        // waitForExistence だけでは見つからない。サイドバーの CollectionView 上で
+        // 上方向へスワイプし、見つかるまでスクロールする。
+        if !graphEntry.exists {
+            let sidebarList = app.collectionViews["Sidebar"]
+            var attempts = 0
+            while !graphEntry.exists, attempts < 15 {
+                sidebarList.swipeUp()
+                graphEntry = app.cells
+                    .containing(NSPredicate(format: "identifier == 'sidebar-graph'")).firstMatch
+                attempts += 1
+            }
+        }
         XCTAssertTrue(graphEntry.waitForExistence(timeout: 5), "サイドバーにグラフビューが無い")
         graphEntry.tap()
 

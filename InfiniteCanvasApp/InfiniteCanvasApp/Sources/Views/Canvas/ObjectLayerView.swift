@@ -13,7 +13,9 @@ struct CanvasObjectItem {
     var text: String
     var fontSize: CGFloat
     var image: UIImage?      // image / pdf のレンダリング済み画像(noteLink ではサムネイル)
-    var isLocked: Bool = false  // PDF 背景など: 移動・リサイズ・削除・選択を禁止
+    var isLocked: Bool = false  // システムロック(PDF 背景など): 完全非対話
+    var isUserLocked: Bool = false  // ユーザーロック: 選択可・南京錠・移動/リサイズ/削除/編集不可
+    var parentGroupID: UUID? = nil  // 同じ UUID を持つオブジェクト同士は同一グループ
     var linkTitle: String = ""  // noteLink: リンク先ノートのタイトル
     var todoItems: [TodoItem] = []  // todo: チェックリストの項目
 }
@@ -37,12 +39,21 @@ final class ObjectLayerUIView: UIView {
     var onSelectionChanged: ((Bool) -> Void)?
     /// ノートリンクのダブルタップでリンク先へジャンプする要求
     var onNoteLinkActivated: ((NSManagedObjectID) -> Void)?
+    /// ユーザーロックのトグル(ロック/ロック解除)要求
+    var onToggleUserLock: ((NSManagedObjectID) -> Void)?
+    /// 選択中の複数オブジェクトを1グループにまとめる要求
+    var onGroupObjects: (([NSManagedObjectID]) -> Void)?
+    /// グループを解除する要求(渡された全 ID の parentGroupID を消す)
+    var onUngroupObjects: (([NSManagedObjectID]) -> Void)?
 
     /// 現在のズーム倍率。オブジェクトはコンテンツ空間に直接配置され、スクロール/ズーム追従は
     /// スクロールビュー(PKCanvasView)の合成に任せるため、この値はスナップ閾値・タッチ判定の
     /// 「スクリーン上の見かけの距離」を保つためだけに使う(ズーム時のみ更新)。
     private(set) var zoom: CGFloat = 1
-    private(set) var selectedID: NSManagedObjectID?
+    /// 選択中のオブジェクト集合(複数選択・グループ選択)
+    private(set) var selectedIDs: Set<NSManagedObjectID> = []
+    /// 単体選択のときだけその ID(テキストツールバー表示・リサイズ・再タップ編集の判定に使う)
+    var selectedID: NSManagedObjectID? { selectedIDs.count == 1 ? selectedIDs.first : nil }
     private var objectViews: [NSManagedObjectID: CanvasObjectUIView] = [:]
     private let guideLayer = CAShapeLayer()
 
@@ -88,7 +99,7 @@ final class ObjectLayerUIView: UIView {
         for (id, view) in objectViews where !ids.contains(id) {
             view.removeFromSuperview()
             objectViews[id] = nil
-            if selectedID == id { selectedID = nil }
+            selectedIDs.remove(id)
         }
         for item in items {
             let view: CanvasObjectUIView
@@ -105,19 +116,94 @@ final class ObjectLayerUIView: UIView {
         }
     }
 
-    // MARK: - 選択
+    // MARK: - 選択(単体・複数・グループ)
 
-    func select(_ id: NSManagedObjectID?) {
-        guard selectedID != id else { return }
-        let hadSelection = selectedID != nil
-        if let old = selectedID { objectViews[old]?.setSelected(false) }
-        selectedID = id
-        if let id { objectViews[id]?.setSelected(true) }
+    /// グループに属していれば同一グループの全 ID、そうでなければ自身のみ。
+    private func groupOrSelf(_ id: NSManagedObjectID) -> Set<NSManagedObjectID> {
+        guard let gid = objectViews[id]?.parentGroupID else { return [id] }
+        let members = objectViews.filter { $0.value.parentGroupID == gid }.map(\.key)
+        return Set(members)
+    }
+
+    /// 選択集合を差し替え、各ビューの選択枠・リサイズハンドルを更新する。
+    private func setSelection(_ ids: Set<NSManagedObjectID>) {
+        guard ids != selectedIDs else { return }
+        let hadSelection = !selectedIDs.isEmpty
+        for old in selectedIDs.subtracting(ids) { objectViews[old]?.setSelected(false) }
+        for new in ids.subtracting(selectedIDs) { objectViews[new]?.setSelected(true) }
+        selectedIDs = ids
+        // 単体/複数でリサイズハンドルの出方が変わるので、選択中の全ビューを更新する
+        for id in ids { objectViews[id]?.refreshSelectionChrome() }
         notifyTextSelection()
-        // 選択の有無が切り替わったときだけ選択モードの ON/OFF を伝える
-        if (id != nil) != hadSelection {
-            onSelectionChanged?(id != nil)
+        if (!ids.isEmpty) != hadSelection {
+            onSelectionChanged?(!ids.isEmpty)
         }
+    }
+
+    /// タップ選択: グループ化済みならグループ全体、そうでなければ単体を選択(置換)。
+    func selectTapped(_ id: NSManagedObjectID) {
+        setSelection(groupOrSelf(id))
+    }
+
+    /// 長押し選択: グループはグループ全体、単体は既存選択へ追加(2つ以上ためてグループ化できる)。
+    func longPressSelect(_ id: NSManagedObjectID) {
+        if objectViews[id]?.parentGroupID != nil {
+            setSelection(groupOrSelf(id))
+        } else {
+            // 既存選択がグループ(全員同一 group)なら置換、そうでなければ追加
+            let existingGrouped = selectedIDs.contains { objectViews[$0]?.parentGroupID != nil }
+            setSelection(existingGrouped ? [id] : selectedIDs.union([id]))
+        }
+    }
+
+    /// 単体選択/全解除(挿入直後フォーカス・背景タップ解除で使う)。
+    func select(_ id: NSManagedObjectID?) {
+        setSelection(id.map { [$0] } ?? [])
+    }
+
+    /// 選択が2つ以上か(グループ化アクションの可否)
+    var hasMultipleSelection: Bool { selectedIDs.count >= 2 }
+
+    /// 選択中のオブジェクトがグループに属しているか(グループ解除アクションの可否)
+    var selectionIsGrouped: Bool {
+        selectedIDs.contains { objectViews[$0]?.parentGroupID != nil }
+    }
+
+    // MARK: - 複数選択の一括移動(グループ/複数選択)
+
+    private var groupMoveStart: [NSManagedObjectID: CGRect] = [:]
+
+    /// 選択中の全オブジェクトを anchor のドラッグ量だけ平行移動する(スナップは無し)。
+    func moveSelection(translation t: CGPoint, state: UIGestureRecognizer.State) {
+        switch state {
+        case .began:
+            groupMoveStart = [:]
+            for id in selectedIDs {
+                if let view = objectViews[id] {
+                    groupMoveStart[id] = view.contentFrame
+                    view.setInteractingExternally(true)
+                }
+            }
+        case .changed:
+            for (id, start) in groupMoveStart {
+                objectViews[id]?.moveContentFrame(to: start.offsetBy(dx: t.x, dy: t.y))
+            }
+        case .ended, .cancelled, .failed:
+            for (id, _) in groupMoveStart {
+                objectViews[id]?.setInteractingExternally(false)
+                if let frame = objectViews[id]?.contentFrame { onFrameChanged?(id, frame) }
+            }
+            groupMoveStart = [:]
+        default:
+            break
+        }
+    }
+
+    /// 選択中の全オブジェクトを削除する(グループ/複数選択の一括削除)。
+    func deleteSelection() {
+        for id in selectedIDs { onDelete?(id) }
+        selectedIDs = []
+        onSelectionChanged?(false)
     }
 
     /// 選択中テキストのフォントサイズ等が変わったときにツールバー表示を更新する(Undo/Redo 追従)
@@ -186,7 +272,9 @@ final class ObjectLayerUIView: UIView {
 final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractionDelegate, UIGestureRecognizerDelegate {
     let objectID: NSManagedObjectID
     let kind: CanvasObjectKind
-    let isLocked: Bool
+    let isLocked: Bool               // システムロック(PDF背景など): 完全非対話
+    private var isUserLocked: Bool   // ユーザーロック: 選択可・南京錠・移動/削除/編集不可
+    private(set) var parentGroupID: UUID?  // 同じ UUID 同士は同一グループ
     private(set) var contentFrame: CGRect  // コンテンツ空間
     private(set) var isInteracting = false
 
@@ -201,6 +289,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private let textView = UITextView()
     private let todoListView = TodoListView()
     private let resizeHandle = UIView()
+    /// ユーザーロック中に隅へ出す南京錠バッジ(タップで解除)
+    private let lockBadge = UIButton(type: .system)
     private lazy var editMenuInteraction = UIEditMenuInteraction(delegate: self)
 
     // ノートリンク用カードUI
@@ -215,11 +305,14 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         self.objectID = item.id
         self.kind = item.kind
         self.isLocked = item.isLocked
+        self.isUserLocked = item.isUserLocked
+        self.parentGroupID = item.parentGroupID
         self.contentFrame = item.frame
         self.fontSize = item.fontSize
         self.layerView = layerView
         super.init(frame: .zero)
-        // ロック(PDF背景など)は移動・リサイズ・選択・削除・編集を一切受け付けない
+        // システムロック(PDF背景など)は移動・リサイズ・選択・削除・編集を一切受け付けない。
+        // ユーザーロックは選択・南京錠タップ・メニューのために対話は残す(操作側で個別に拒否)。
         isUserInteractionEnabled = !item.isLocked
 
         layer.borderColor = UIColor.systemBlue.cgColor
@@ -264,6 +357,19 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.isHidden = true
         addSubview(resizeHandle)
 
+        // 南京錠バッジ(ユーザーロック中のみ表示、タップで解除)。右上の角に半分かかる配置。
+        let lockSymbol = UIImage(systemName: "lock.fill",
+                                 withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        lockBadge.setImage(lockSymbol, for: .normal)
+        lockBadge.tintColor = .white
+        lockBadge.backgroundColor = .systemBlue
+        lockBadge.layer.cornerRadius = 11
+        lockBadge.imageView?.contentMode = .scaleAspectFit
+        lockBadge.isHidden = true
+        lockBadge.accessibilityIdentifier = "object-lock-badge"
+        lockBadge.addTarget(self, action: #selector(handleLockBadgeTap), for: .touchUpInside)
+        addSubview(lockBadge)
+
         // オブジェクト操作(選択・移動・リサイズ・長押し・リンクジャンプ)はすべて「指」で行う。
         // Apple Pencil のタッチはこれらを起動せず、祖先の PKCanvasView が描画として受け取る。
         let fingerOnly = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
@@ -290,13 +396,31 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         longPress.allowedTouchTypes = fingerOnly
         addGestureRecognizer(longPress)
 
-        // ノートリンクはダブルタップでリンク先へジャンプ
+        // ノートリンクはダブルタップでリンク先へジャンプ。
+        // require(toFail:) が無いと単タップ(1回目のタップで即成立)が毎回先に発火し、
+        // ジャンプの直前に選択状態のフリッカーが入ってしまう。
         if kind == .noteLink {
             let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleNoteLinkJump))
             doubleTap.numberOfTapsRequired = 2
             doubleTap.allowedTouchTypes = fingerOnly
             addGestureRecognizer(doubleTap)
+            tap.require(toFail: doubleTap)
         }
+
+        configureLockState()
+    }
+
+    /// ユーザーロック状態に応じて南京錠バッジの表示・コンテンツ編集可否を更新する。
+    private func configureLockState() {
+        lockBadge.isHidden = !isUserLocked
+        if isUserLocked { bringSubviewToFront(lockBadge) }
+        // Todo はロック中チェック/編集させない(テキスト・画像は元々編集開始まで非対話)
+        if kind == .todo { todoListView.isUserInteractionEnabled = !isUserLocked }
+        setNeedsLayout()
+    }
+
+    @objc private func handleLockBadgeTap() {
+        layerView?.onToggleUserLock?(objectID)
     }
 
     /// ノートリンクのカードUIを構築する(角丸・影・境界線・アイコン+タイトル+サムネイル)
@@ -353,6 +477,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         textView.frame = bounds
         todoListView.frame = bounds
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
+        lockBadge.frame = CGRect(x: bounds.width - 11, y: -11, width: 22, height: 22)  // 右上の角
 
         if kind == .noteLink {
             linkCard.frame = bounds
@@ -400,6 +525,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         let fontChanged = kind == .text && fontSize != item.fontSize
         contentFrame = item.frame
         fontSize = item.fontSize
+        parentGroupID = item.parentGroupID
+        if isUserLocked != item.isUserLocked {
+            isUserLocked = item.isUserLocked
+            if isUserLocked { endTextEditing() }
+            configureLockState()
+            refreshSelectionChrome()  // ロック中はリサイズハンドルを出さない(選択枠は残す)
+        }
         if kind == .text, !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
@@ -449,8 +581,22 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     func setSelected(_ selected: Bool) {
         isSelected = selected
         layer.borderWidth = selected ? 2 : 0
-        resizeHandle.isHidden = !selected
         if !selected { endTextEditing() }
+        refreshSelectionChrome()
+    }
+
+    /// リサイズハンドルの表示可否を現在の選択状況から更新する。
+    /// リサイズは「単体選択かつ非ロック」のときだけ(複数選択/グループ選択では出さない)。
+    func refreshSelectionChrome() {
+        let single = layerView?.selectedID == objectID
+        resizeHandle.isHidden = !isSelected || !single || isUserLocked
+    }
+
+    /// レイヤー主導の一括移動用: 対話フラグと配置を外部から設定する。
+    func setInteractingExternally(_ value: Bool) { isInteracting = value }
+    func moveContentFrame(to frame: CGRect) {
+        contentFrame = frame
+        applyPlacement()
     }
 
     /// 移動パンは「このオブジェクトが選択済み」のときだけ開始する(選択してから移動)。
@@ -458,7 +604,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// (UIView 自身も同名メソッドを持つため override が必要)
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer === movePan {
-            return layerView?.selectedID == objectID
+            // 選択済み(単体 or 複数選択の一員)かつ非ロックのときだけ移動を開始する
+            return (layerView?.selectedIDs.contains(objectID) ?? false) && !isUserLocked
         }
         return true
     }
@@ -487,6 +634,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     // MARK: - テキスト編集
 
     func beginTextEditing() {
+        guard !isUserLocked else { return }  // ロック中は編集不可
         switch kind {
         case .text:
             textView.isEditable = true
@@ -532,10 +680,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     @objc private func handleTap() {
         // 指タップはツールに関係なくオブジェクトを選択できる(hitTest が指タッチを通す)。
         guard let layerView else { return }
-        if layerView.selectedID != objectID {
-            layerView.select(objectID)
-        } else if kind == .text || kind == .todo {
-            beginTextEditing()  // 選択済みのテキスト/Todoを再タップで編集開始
+        if layerView.selectedID == objectID {
+            // 単体選択中の再タップ → テキスト/Todoを編集開始
+            if kind == .text || kind == .todo { beginTextEditing() }
+        } else {
+            // グループ化済みならグループ全体、そうでなければ単体を選択
+            layerView.selectTapped(objectID)
         }
     }
 
@@ -546,11 +696,16 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     @objc private func handleMovePan(_ gesture: UIPanGestureRecognizer) {
-        // 選択済みのオブジェクトだけを移動する(未選択は shouldBegin で弾かれスクロールになる)
-        guard let layerView, layerView.selectedID == objectID else { return }
+        guard let layerView, layerView.selectedIDs.contains(objectID) else { return }
+        // 複数選択/グループ選択のときは選択全体を一括で動かす(レイヤーが調整)
+        if layerView.selectedIDs.count > 1 {
+            if gesture.state == .began { endTextEditing() }
+            layerView.moveSelection(translation: gesture.translation(in: layerView), state: gesture.state)
+            return
+        }
+        // 以下は単体選択の移動(スナップあり)
         switch gesture.state {
         case .began:
-            layerView.select(objectID)
             endTextEditing()
             isInteracting = true
             gestureStartFrame = contentFrame
@@ -600,6 +755,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             applyPlacement()
         case .ended, .cancelled, .failed:
             isInteracting = false
+            // リサイズ中に行の増減があると、todoListView.onHeightChanged は
+            // isInteracting ガードで無視され続けていた。ここで isInteracting を
+            // false にした直後に高さを再計算させ、取りこぼしを解消する。
+            if kind == .todo { todoListView.reportHeight() }
             layerView.onFrameChanged?(objectID, contentFrame)
         default:
             break
@@ -607,9 +766,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        // 指の長押しはツールに関係なく、選択+削除メニューを出せる(hitTest が指タッチを通す)。
+        // 指の長押しはツールに関係なくメニューを出せる(hitTest が指タッチを通す)。
+        // グループはグループ全体、単体は既存選択へ追加(2つ以上ためてグループ化できる)。
         guard gesture.state == .began, let layerView else { return }
-        layerView.select(objectID)
+        layerView.longPressSelect(objectID)
         endTextEditing()
         let config = UIEditMenuConfiguration(
             identifier: nil,
@@ -623,13 +783,44 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         menuFor configuration: UIEditMenuConfiguration,
         suggestedActions: [UIMenuElement]
     ) -> UIMenu? {
-        UIMenu(children: [
-            UIAction(title: "削除", image: UIImage(systemName: "trash"), attributes: .destructive) {
-                [weak self] _ in
-                guard let self else { return }
-                self.layerView?.onDelete?(self.objectID)
-            }
-        ])
+        guard let layerView else { return nil }
+        let multi = layerView.selectedIDs.count > 1
+
+        // 単体ロック中は解除のみ(削除は受け付けない)
+        if isUserLocked, !multi {
+            return UIMenu(children: [
+                UIAction(title: "ロック解除", image: UIImage(systemName: "lock.open")) { [weak self] _ in
+                    guard let self else { return }
+                    self.layerView?.onToggleUserLock?(self.objectID)
+                }
+            ])
+        }
+
+        var actions: [UIMenuElement] = []
+        let ids = Array(layerView.selectedIDs)
+        if layerView.selectionIsGrouped {
+            actions.append(UIAction(title: "グループ解除", image: UIImage(systemName: "rectangle.on.rectangle.slash")) {
+                [weak self] _ in self?.layerView?.onUngroupObjects?(ids)
+            })
+        } else if multi {
+            actions.append(UIAction(title: "グループ化", image: UIImage(systemName: "square.on.square")) {
+                [weak self] _ in self?.layerView?.onGroupObjects?(ids)
+            })
+        }
+        if !multi {
+            actions.append(UIAction(title: "ロック", image: UIImage(systemName: "lock")) {
+                [weak self] _ in guard let self else { return }
+                self.layerView?.onToggleUserLock?(self.objectID)
+            })
+        }
+        // 削除: 複数選択は一括、単体は個別
+        actions.append(UIAction(title: "削除", image: UIImage(systemName: "trash"), attributes: .destructive) {
+            [weak self] _ in
+            guard let self, let layerView = self.layerView else { return }
+            if layerView.selectedIDs.count > 1 { layerView.deleteSelection() }
+            else { layerView.onDelete?(self.objectID) }
+        })
+        return UIMenu(children: actions)
     }
 }
 
@@ -805,7 +996,8 @@ final class TodoListView: UIView {
     }
 
     /// 行数から必要高さを算出して通知する。
-    private func reportHeight() {
+    /// リサイズ操作終了時に外側(CanvasObjectUIView)から明示的に再計算させるため fileprivate。
+    fileprivate func reportHeight() {
         let height = Self.vInset * 2 + Self.rowHeight * CGFloat(items.count + 1)
         onHeightChanged?(height)
     }

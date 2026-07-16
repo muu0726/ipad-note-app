@@ -16,6 +16,9 @@ final class SplitViewUITests: XCTestCase {
     func testOpenRightThenCloseSplit() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        // キャンバスは既定で Pencil Only(指では描けない)。XCUITest は Pencil 入力を
+        // 模倣できないため、指描画を許可して描画系(Undo有効化)を検証する。
+        app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
         app.launch()
 
         let nameA = "SPLA\(Int.random(in: 10000...99999))"

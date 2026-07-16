@@ -100,6 +100,10 @@ final class PenToolState: ObservableObject {
     /// フォントサイズの調整範囲(pt)
     static let fontSizeRange: ClosedRange<CGFloat> = 12...72
 
+    /// 蛍光ペン(マーカー)インクの不透明度。前面キャンバスでは 0 にして不可視化し、
+    /// 背面ミラー(オブジェクトの下)ではこの値へ戻して描く(蛍光ペンの背面回り込み)。
+    static let markerAlpha: CGFloat = 0.5
+
     var currentWidth: CGFloat {
         get { widths[tool] ?? 3 }
         set { widths[tool] = min(max(newValue, widthRange.lowerBound), widthRange.upperBound) }
@@ -141,7 +145,10 @@ final class PenToolState: ObservableObject {
         case .pen:
             return PKInkingTool(.pen, color: penColor, width: currentWidth)
         case .marker:
-            return PKInkingTool(.marker, color: markerColor, width: currentWidth)
+            // マーカーは半透明で描く。描き終えると前面キャンバスからは不可視化(alpha 0)され、
+            // オブジェクトレイヤーの下の背面ミラーへ Self.markerAlpha で描き直される
+            // (蛍光ペンがテキスト・画像の「背面に回り込む」ように見せる)。
+            return PKInkingTool(.marker, color: markerColor.withAlphaComponent(Self.markerAlpha), width: currentWidth)
         case .eraser:
             // .bitmap = なぞった部分だけ消える(ストローク丸ごと消える .vector ではなく)
             return PKEraserTool(.bitmap, width: currentWidth)
