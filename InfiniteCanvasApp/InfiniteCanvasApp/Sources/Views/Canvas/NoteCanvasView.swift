@@ -152,6 +152,10 @@ struct NoteCanvasView: View {
                     openLinkedNote(objectID: id)
                 },
                 onAppendPage: { addPage() },
+                onSelectionChanged: { hasSelection in
+                    // オブジェクトの選択有無を選択モードへ反映(描画停止・単指操作の切替)
+                    toolState.isSelectMode = hasSelection
+                },
                 onCanvasReady: { undoBridge.attach($0) }
             )
             .onChange(of: insertion) { _, request in
@@ -422,7 +426,8 @@ struct NoteCanvasView: View {
 
         // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる
         try? context.obtainPermanentIDs(for: [object])
-        toolState.tool = .selector  // 配置直後にそのまま移動・編集できるよう選択モードへ
+        // 配置直後はオブジェクトを選択状態にし、そのまま移動・編集できるようにする。
+        // 選択は autoFocus(layer.focus)が行い、その通知で選択モードへ切り替わる。
         autoFocusObjectID = object.objectID
         persist()
         if let uuid = object.id {

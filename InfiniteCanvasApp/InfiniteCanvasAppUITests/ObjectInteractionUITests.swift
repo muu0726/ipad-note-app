@@ -14,6 +14,8 @@ final class ObjectInteractionUITests: XCTestCase {
         let marker = insertText(app)
         let before = marker.frame
 
+        // 新モデル(選択してから移動): まず指タップで選択し、その上でドラッグして動かす
+        marker.tap()
         let start = marker.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: 220, dy: 150)))
 

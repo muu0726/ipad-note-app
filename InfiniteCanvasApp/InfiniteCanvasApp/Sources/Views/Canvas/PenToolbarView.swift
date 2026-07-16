@@ -94,7 +94,6 @@ struct PenToolbarView: View {
 
     private var toolButtons: some View {
         HStack(spacing: 4) {
-            toolButton(.selector, icon: "hand.point.up.left")
             toolButton(.lasso, icon: "lasso")
             toolButton(.pen, icon: "pencil.tip")
             toolButton(.marker, icon: "highlighter")
@@ -105,6 +104,9 @@ struct PenToolbarView: View {
     private func toolButton(_ tool: CanvasTool, icon: String) -> some View {
         Button {
             toolState.tool = tool
+            // 描画/消しゴム/投げ縄を選んだら、直前のオブジェクト選択は解除して描画に戻す。
+            // (選択解除はオブジェクトレイヤーへ伝播し、描画ジェスチャが再び有効になる)
+            toolState.isSelectMode = false
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 18))

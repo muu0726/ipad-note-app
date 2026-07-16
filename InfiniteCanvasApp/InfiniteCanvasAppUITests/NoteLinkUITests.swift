@@ -97,8 +97,7 @@ final class NoteLinkUITests: XCTestCase {
                        "削除後もリンク先タイトルが残っている(引き直していない)")
         attachScreenshot(app, name: "3-dangling-link-card")
 
-        // 選択モードでダブルタップしてもジャンプしない(リンク元に留まる)
-        app.buttons["toolbar-tool-selector"].tap()
+        // ダブルタップしてもジャンプしない(リンク切れなのでリンク元に留まる)
         deadCard.doubleTap()
         // 少し待ってもナビバーはリンク元のまま(リンク先タイトルへ切り替わらない)
         XCTAssertFalse(app.navigationBars[targetName].waitForExistence(timeout: 3),

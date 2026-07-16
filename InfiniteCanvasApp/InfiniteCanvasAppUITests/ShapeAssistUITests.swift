@@ -50,6 +50,53 @@ final class ShapeAssistUITests: XCTestCase {
         attachScreenshot(app, name: "3-アシストOFFで再描画後")
     }
 
+    /// 図形認識アシストで手書きが図形へ置換された後も Undo/Redo が機能することを検証する。
+    /// 修正前は `canvasView.drawing` の直接代入で PencilKit の Undo 履歴が壊れ、
+    /// 置換後に戻る/やり直しが効かなくなっていた(逆操作を UndoManager へ手動登録して解消)。
+    @MainActor
+    func testUndoRedoAfterShapeAssist() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
+        app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launch()
+        try openAnyNote(app)
+
+        let toggle = app.buttons["toolbar-shape-assist"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "図形アシストのトグルが見つからない")
+
+        // 図形アシスト ON にして直線を描く(図形置換パイプラインを走らせる)
+        if !toggle.isSelected { toggle.tap() }
+        XCTAssertTrue(toggle.waitForSelected(true, timeout: 3), "トグルが ON にならない")
+
+        let canvas = app.windows.firstMatch
+        let start = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.30, dy: 0.45))
+        let end = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.62, dy: 0.62))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        attachScreenshot(app, name: "1-アシストONで直線描画後")
+
+        // 置換後: 逆操作が UndoManager に登録され、戻るが有効になっているはず
+        let undo = app.buttons["toolbar-undo"]
+        let redo = app.buttons["toolbar-redo"]
+        XCTAssertTrue(undo.waitForEnabled(true, timeout: 5),
+                      "図形置換後に Undo が有効にならない(履歴が登録されていない)")
+
+        // 戻る → 図形置換が取り消され、やり直しが有効になる(=可逆であること)
+        undo.tap()
+        XCTAssertTrue(redo.waitForEnabled(true, timeout: 5),
+                      "Undo 後に Redo が有効にならない(逆操作が壊れている)")
+        attachScreenshot(app, name: "2-Undo後")
+
+        // やり直し → 図形が復元され、戻るが再び有効になる
+        redo.tap()
+        XCTAssertTrue(undo.waitForEnabled(true, timeout: 5),
+                      "Redo 後に Undo が有効にならない(やり直しが壊れている)")
+        attachScreenshot(app, name: "3-Redo後")
+
+        // 一連の操作後もツールバーが即応答する(メインスレッドが生きている)
+        XCTAssertTrue(toggle.isHittable, "Undo/Redo 後にツールバーが操作できない")
+    }
+
     // MARK: - ヘルパー
 
     @MainActor
@@ -91,5 +138,15 @@ private extension XCUIElement {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
         return isSelected == expected
+    }
+
+    /// isEnabled が期待値になるまで待つ
+    func waitForEnabled(_ expected: Bool, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if isEnabled == expected { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return isEnabled == expected
     }
 }

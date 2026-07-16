@@ -128,6 +128,9 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onNoteLinkActivated: (NSManagedObjectID) -> Void
     /// 通常ノートで、最後のページを超えて横に引っ張ったときにページを1枚追加する要求
     let onAppendPage: () -> Void
+    /// オブジェクトの選択状態が変わったとき(true=何か選択中 / false=未選択)。
+    /// 選択中は選択モード(描画停止・単指はオブジェクト操作)へ切り替える。
+    let onSelectionChanged: (Bool) -> Void
     /// Undo/Redo ブリッジなどにキャンバスを渡す
     let onCanvasReady: (PKCanvasView) -> Void
 
@@ -231,6 +234,11 @@ struct CanvasRepresentable: UIViewRepresentable {
         }
         container.objectLayer.onNoteLinkActivated = { [weak coordinator] id in
             coordinator?.parent.onNoteLinkActivated(id)
+        }
+        // 選択状態の変化を SwiftUI(PenToolState.isSelectMode)へ伝える。
+        // これが選択モード(描画停止・単指操作)の真実のソースになる。
+        container.objectLayer.onSelectionChanged = { [weak coordinator] hasSelection in
+            coordinator?.parent.onSelectionChanged(hasSelection)
         }
 
         // 初期ビューポート(保存がなければ形式ごとの初期位置)
@@ -438,21 +446,31 @@ struct CanvasRepresentable: UIViewRepresentable {
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            // プログラムによる置換実行中の再入(drawing 差し替え/undo による通知)は完全にスキップ。
+            if isReplacingShape { return }
+
             // 図形認識アシスト: 直前に「1本だけ増えた」インクストロークを図形へ置換する。
             // 消しゴム(ストローク分割で数が増減)や選択操作を巻き込まないよう
             // インクツール中かつストローク数が +1 のときだけ判定する。
-            if !isReplacingShape,
-               parent.isShapeAssistEnabled,
+            if parent.isShapeAssistEnabled,
                parent.pkTool is PKInkingTool,
                canvasView.drawing.strokes.count == lastStrokeCount + 1,
                let last = canvasView.drawing.strokes.last,
                let cleanStroke = ShapeRecognizer.cleanShape(from: last) {
+                let oldDrawing = previousDrawing  // 手書きストロークが追加される前の描画
                 var newDrawing = canvasView.drawing
                 newDrawing.strokes.removeLast()
                 newDrawing.strokes.append(cleanStroke)
+
+                // 1. PencilKit が自動登録した「手書き追加」の Undo アクションを取り消し、
+                //    履歴上に手書き分を残さない(以降は図形置換のみを1手として扱う)。
                 isReplacingShape = true
-                canvasView.drawing = newDrawing  // 同期再入しても上のフラグで無視される
+                canvasView.undoManager?.undo()
                 isReplacingShape = false
+
+                // 2. 双方向 Undo/Redo をサポートしつつ図形へ置換する。
+                replaceDrawingWithUndoSupport(canvasView, to: newDrawing, from: oldDrawing)
+                return
             }
             // 投げ縄ツール中のインク移動・削除を差分検知し、重なるオブジェクトも連動させる
             if parent.pkTool is PKLassoTool {
@@ -465,6 +483,38 @@ struct CanvasRepresentable: UIViewRepresentable {
             parent.drawing = canvasView.drawing
             parent.onDrawingChanged()
             isCanvasSourceOfTruth = false
+        }
+
+        /// 双方向の Undo/Redo をサポートしながら CanvasView の描画を置換する。
+        /// `.drawing` の直接代入は PencilKit が Undo を自動登録しないため、
+        /// 逆操作を UndoManager へ手動登録して「戻る/やり直し」を成立させる。
+        /// (Undo で currentDrawing へ戻り、Redo で nextDrawing へ進む)
+        private func replaceDrawingWithUndoSupport(
+            _ canvasView: PKCanvasView,
+            to nextDrawing: PKDrawing,
+            from currentDrawing: PKDrawing
+        ) {
+            // 置換中は didChange の再入を無視する(async 通知を含め全体をガード)。
+            isReplacingShape = true
+            defer { isReplacingShape = false }
+
+            canvasView.drawing = nextDrawing
+
+            // 状態の同期と変更イベントの発火
+            isCanvasSourceOfTruth = true
+            parent.drawing = nextDrawing
+            parent.onDrawingChanged()
+            isCanvasSourceOfTruth = false
+
+            // 次回比較用とストローク数の更新
+            previousDrawing = nextDrawing
+            lastStrokeCount = nextDrawing.strokes.count
+
+            // 逆方向の操作を UndoManager に登録する。
+            // (新規登録によりスタック上の stale な redo は自動的に破棄される)
+            canvasView.undoManager?.registerUndo(withTarget: canvasView) { [weak self] targetCanvas in
+                self?.replaceDrawingWithUndoSupport(targetCanvas, to: currentDrawing, from: nextDrawing)
+            }
         }
 
         /// makeUIView / 差し替え時に基準の描画を設定する
@@ -558,17 +608,17 @@ final class ObjectAccessibleCanvasView: PKCanvasView {
     }
 
     /// オブジェクトレイヤーはインク描画面より下にあり、通常はタッチが届かない。
-    /// 選択モード中はここでオブジェクトへのヒットを優先し、移動・長押し・タップ選択を可能にする。
-    /// (スクロール用ジェスチャはスクロールビュー自身に付いているので2本指スクロールは維持される)
+    /// オブジェクトに当たったタッチは(入力の種類に関係なく)常にオブジェクトへ通す。
+    /// 指とペンの振り分けはここではなく、それぞれのジェスチャ側で行う:
+    /// - オブジェクトの選択・移動・長押しジェスチャは allowedTouchTypes=.direct(指のみ)。
+    /// - Apple Pencil のタッチはオブジェクト上でも、祖先の PKCanvasView の描画ジェスチャが
+    ///   受け取ってそのまま描ける(DrawingTouchGate が指のオブジェクト上描画だけ弾く)。
+    /// 空き領域(objectLayer 自身)や用紙外は super に委ね、単指スクロールを維持する。
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if let objectLayer {
             let converted = convert(point, to: objectLayer)
             if let hit = objectLayer.hitTest(converted, with: event), hit !== objectLayer {
-                // 選択モードでは全オブジェクトへ、非選択モードでもノートリンクの「開く」
-                // ボタンだけはタッチを通し、どのツールでもリンク先へ飛べるようにする。
-                if objectLayer.isSelectMode || hit is NoteLinkOpenButton {
-                    return hit
-                }
+                return hit
             }
         }
         return super.hitTest(point, with: event)
@@ -582,14 +632,17 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     /// 描画ジェスチャに差し込むゲート(「開く」ボタン上・用紙外ではインクを始めない)
     let drawingTouchGate = DrawingTouchGate()
 
-    /// 選択モード(要件③)。描画ジェスチャを無効化し、単指はオブジェクト操作へ回す。
-    /// オブジェクトがスクロールビュー内部にあるため、単指ドラッグでの誤スクロールを防ぐべく
-    /// 選択モード中のスクロールは2本指に限定する(描画モードのスクロールと同じ操作感)。
+    /// 選択モード(オブジェクトを1つ選択している状態)。
+    /// オブジェクトがスクロールビュー内部にあるため、選択中の単指ドラッグが誤スクロールに
+    /// ならないよう、選択中のスクロールは2本指に限定する(選択物は単指ドラッグで移動)。
+    /// 描画ジェスチャは常に有効のまま(Pencil は選択中でも描ける)。指がインクを引かないのは
+    /// pencilOnly と DrawingTouchGate(指×オブジェクトの除外)が担う。
+    /// ※ ここで drawingGestureRecognizer を無効化しないこと。長押し等で選択が発生した瞬間に
+    ///   ジェスチャ設定を変えると、進行中の長押し/メニュー提示がキャンセルされてしまう。
     var isSelectMode = false {
         didSet {
             guard isSelectMode != oldValue else { return }
             objectLayer.isSelectMode = isSelectMode
-            canvasView.drawingGestureRecognizer.isEnabled = !isSelectMode
             canvasView.panGestureRecognizer.minimumNumberOfTouches = isSelectMode ? 2 : 1
         }
     }
@@ -676,12 +729,26 @@ final class DrawingTouchGate: NSObject, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldReceive touch: UITouch) -> Bool {
         if touch.view is NoteLinkOpenButton { return false }
+        // 指(direct)のタッチがオブジェクトの上で始まったら描画しない(選択・移動へ回す)。
+        // Apple Pencil のタッチはオブジェクトの上でもそのまま描ける(用紙に注釈できる)。
+        if touch.type == .direct, touchBeganOnObject(touch) { return false }
         // 用紙外(通常ノートのグレー余白)など、描画を許可しない領域ではストロークを始めない
         if let isTouchAllowed, let view = gestureRecognizer.view,
            !isTouchAllowed(touch.location(in: view)) {
             return false
         }
         return forward?.gestureRecognizer?(gestureRecognizer, shouldReceive: touch) ?? true
+    }
+
+    /// タッチがオブジェクト(CanvasObjectUIView)の上で始まったか。
+    /// hitTest が指タッチをオブジェクトへ通すため、touch.view から親を辿って判定できる。
+    private func touchBeganOnObject(_ touch: UITouch) -> Bool {
+        var view = touch.view
+        while let current = view {
+            if current is CanvasObjectUIView { return true }
+            view = current.superview
+        }
+        return false
     }
 
     // shouldReceive 以外の UIGestureRecognizerDelegate 呼び出しは元 delegate へ丸ごと委譲する

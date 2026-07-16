@@ -4,7 +4,7 @@ import Combine
 import CoreData
 
 enum CanvasTool: String, CaseIterable {
-    case selector, lasso, pen, marker, eraser
+    case lasso, pen, marker, eraser
 }
 
 /// 選択中のテキストオブジェクト情報(ツールバーのフォントサイズ UI 用)
@@ -87,9 +87,15 @@ final class PenToolState: ObservableObject {
     /// きれいな図形へ自動置換する。誤判定を嫌うユーザー向けに既定は OFF。
     @Published var isShapeAssistEnabled = false
 
-    /// 選択ツールで選択中のテキストオブジェクト(なければ nil)。
+    /// 選択中のテキストオブジェクト(なければ nil)。
     /// これが非nilかつ選択モードのときツールバーにフォントサイズ変更UIを出す。
     @Published var selectedTextObject: SelectedTextObject?
+
+    /// オブジェクトの選択・移動モードかどうか。
+    /// 専用の「選択ツール」は廃止し、指でオブジェクトをタップして選択している間だけ true になる
+    /// (真実のソースはオブジェクトレイヤーの選択状態。選択/解除のたびに書き戻される)。
+    /// 選択中は描画ジェスチャを止め、単指はオブジェクト操作・スクロールは2本指に切り替わる。
+    @Published var isSelectMode = false
 
     /// フォントサイズの調整範囲(pt)
     static let fontSizeRange: ClosedRange<CGFloat> = 12...72
@@ -105,19 +111,16 @@ final class PenToolState: ObservableObject {
         case .pen: 0.5...20
         case .marker: 2...40
         case .eraser: 4...80
-        case .selector, .lasso: 1...1  // 未使用(太さ UI を無効化)
+        case .lasso: 1...1  // 未使用(太さ UI を無効化)
         }
     }
 
     var currentColor: UIColor {
         switch tool {
-        case .pen, .eraser, .selector, .lasso: penColor
+        case .pen, .eraser, .lasso: penColor
         case .marker: markerColor
         }
     }
-
-    /// オブジェクトの選択・移動モードかどうか(要件③)
-    var isSelectMode: Bool { tool == .selector }
 
     /// 太さ・色の調整 UI が意味を持たないツールかどうか
     var isWidthAdjustable: Bool {
@@ -128,7 +131,7 @@ final class PenToolState: ObservableObject {
         switch tool {
         case .pen: penColor = color
         case .marker: markerColor = color
-        case .eraser, .selector, .lasso: break
+        case .eraser, .lasso: break
         }
     }
 
@@ -145,9 +148,6 @@ final class PenToolState: ObservableObject {
         case .lasso:
             // 手書きストロークを囲って選択 → ドラッグ移動、タップでカット/コピー/削除メニュー
             return PKLassoTool()
-        case .selector:
-            // 選択モード中は描画ジェスチャ自体を無効化するため実際には使われない
-            return PKInkingTool(.pen, color: penColor, width: currentWidth)
         }
     }
 }

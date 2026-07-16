@@ -72,7 +72,6 @@ final class NoteLinkSourceMoveUITests: XCTestCase {
                        "フォルダ移動でリンクが削除扱いになっている")
         attachScreenshot(app, name: "1-source-in-folder")
 
-        app.buttons["toolbar-tool-selector"].tap()
         card.doubleTap()
         XCTAssertTrue(app.navigationBars[targetName].waitForExistence(timeout: 5),
                       "リンク元フォルダ移動後にリンク先へジャンプできない")

@@ -65,6 +65,8 @@ final class ObjectUndoUITests: XCTestCase {
         attachScreenshot(app, name: "3-Redo2回で復元")
 
         // ⑤ 移動 → Undo で元の位置に戻る
+        // 新モデル(選択してから移動): まず指タップで選択してからドラッグする
+        markerView.tap()
         let frameBeforeMove = markerView.frame
         let start = markerView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         let destination = start.withOffset(CGVector(dx: 180, dy: 120))

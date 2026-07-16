@@ -39,11 +39,19 @@ final class CanvasUndoBridge: ObservableObject {
 
     func undo() {
         canvasView?.undoManager?.undo()
-        refresh()
+        syncNow()
     }
 
     func redo() {
         canvasView?.undoManager?.redo()
-        refresh()
+        syncNow()
+    }
+
+    /// undo()/redo() 直後は状態が確定しているので同期で反映する。
+    /// (async refresh だけだと、描画デリゲート由来の stale な更新が後勝ちして
+    ///  ボタンが実際の canUndo/canRedo と食い違うことがあるため)
+    private func syncNow() {
+        canUndo = canvasView?.undoManager?.canUndo ?? false
+        canRedo = canvasView?.undoManager?.canRedo ?? false
     }
 }

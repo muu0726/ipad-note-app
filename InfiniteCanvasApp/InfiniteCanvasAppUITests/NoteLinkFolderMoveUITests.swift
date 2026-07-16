@@ -79,7 +79,6 @@ final class NoteLinkFolderMoveUITests: XCTestCase {
         attachScreenshot(app, name: "1-card-after-move")
 
         // ダブルタップでリンク先へジャンプできる
-        app.buttons["toolbar-tool-selector"].tap()
         card.doubleTap()
         XCTAssertTrue(app.navigationBars[targetName].waitForExistence(timeout: 5),
                       "フォルダ移動後にリンク先へジャンプできない")

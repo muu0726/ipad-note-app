@@ -33,6 +33,8 @@ final class ObjectLayerUIView: UIView {
     var onAutoHeightChanged: ((NSManagedObjectID, CGFloat) -> Void)?
     /// 選択が変わったときに「選択中テキストの (id, fontSize)」を通知(テキスト以外や未選択は nil)
     var onTextSelectionChanged: (((objectID: NSManagedObjectID, fontSize: CGFloat)?) -> Void)?
+    /// 何か選択中(true)か未選択(false)かの変化を通知。選択モードの真実のソースになる。
+    var onSelectionChanged: ((Bool) -> Void)?
     /// ノートリンクのダブルタップでリンク先へジャンプする要求
     var onNoteLinkActivated: ((NSManagedObjectID) -> Void)?
 
@@ -107,10 +109,15 @@ final class ObjectLayerUIView: UIView {
 
     func select(_ id: NSManagedObjectID?) {
         guard selectedID != id else { return }
+        let hadSelection = selectedID != nil
         if let old = selectedID { objectViews[old]?.setSelected(false) }
         selectedID = id
         if let id { objectViews[id]?.setSelected(true) }
         notifyTextSelection()
+        // 選択の有無が切り替わったときだけ選択モードの ON/OFF を伝える
+        if (id != nil) != hadSelection {
+            onSelectionChanged?(id != nil)
+        }
     }
 
     /// 選択中テキストのフォントサイズ等が変わったときにツールバー表示を更新する(Undo/Redo 追従)
@@ -187,6 +194,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private var fontSize: CGFloat
     private var isSelected = false
     private var gestureStartFrame: CGRect = .zero
+    /// 移動用パン。選択済みのときだけ開始させる判定(gestureRecognizerShouldBegin)に使う
+    private weak var movePan: UIPanGestureRecognizer?
 
     private let imageView = UIImageView()
     private let textView = UITextView()
@@ -255,26 +264,37 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.isHidden = true
         addSubview(resizeHandle)
 
+        // オブジェクト操作(選択・移動・リサイズ・長押し・リンクジャンプ)はすべて「指」で行う。
+        // Apple Pencil のタッチはこれらを起動せず、祖先の PKCanvasView が描画として受け取る。
+        let fingerOnly = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
         tap.delegate = self  // Todo の行内コントロールへのタップは横取りしない
+        tap.allowedTouchTypes = fingerOnly
         addGestureRecognizer(tap)
         let movePan = UIPanGestureRecognizer(target: self, action: #selector(handleMovePan(_:)))
         movePan.maximumNumberOfTouches = 1
+        movePan.allowedTouchTypes = fingerOnly
+        // 移動パンは「選択済みのオブジェクト」でのみ開始する(gestureRecognizerShouldBegin)。
+        // 未選択オブジェクト上の指ドラッグはパンを開始させず、スクロールへ委ねる(選択してから移動)。
+        movePan.delegate = self
+        self.movePan = movePan
         addGestureRecognizer(movePan)
-        resizeHandle.addGestureRecognizer(
-            UIPanGestureRecognizer(target: self, action: #selector(handleResizePan(_:)))
-        )
+        let resizePan = UIPanGestureRecognizer(target: self, action: #selector(handleResizePan(_:)))
+        resizePan.allowedTouchTypes = fingerOnly
+        resizeHandle.addGestureRecognizer(resizePan)
 
         // 長押しで削除メニューを出す(要件: 画像等のオブジェクトは長押しで消す)
         addInteraction(editMenuInteraction)
-        addGestureRecognizer(
-            UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-        )
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.allowedTouchTypes = fingerOnly
+        addGestureRecognizer(longPress)
 
         // ノートリンクはダブルタップでリンク先へジャンプ
         if kind == .noteLink {
             let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleNoteLinkJump))
             doubleTap.numberOfTapsRequired = 2
+            doubleTap.allowedTouchTypes = fingerOnly
             addGestureRecognizer(doubleTap)
         }
     }
@@ -433,6 +453,16 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if !selected { endTextEditing() }
     }
 
+    /// 移動パンは「このオブジェクトが選択済み」のときだけ開始する(選択してから移動)。
+    /// 未選択オブジェクト上の指ドラッグはパンを開始させず、スクロールビューのスクロールに委ねる。
+    /// (UIView 自身も同名メソッドを持つため override が必要)
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === movePan {
+            return layerView?.selectedID == objectID
+        }
+        return true
+    }
+
     // Todo の行内コントロール(チェックボックス/テキスト欄)へのタップは、
     // 親のタップ(=再選択・編集開始)に横取りさせずコントロールへ渡す。
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -500,7 +530,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     // MARK: - ジェスチャ
 
     @objc private func handleTap() {
-        guard let layerView, layerView.isSelectMode else { return }
+        // 指タップはツールに関係なくオブジェクトを選択できる(hitTest が指タッチを通す)。
+        guard let layerView else { return }
         if layerView.selectedID != objectID {
             layerView.select(objectID)
         } else if kind == .text || kind == .todo {
@@ -510,12 +541,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
     /// ノートリンクのダブルタップ → リンク先ノートを開く
     @objc private func handleNoteLinkJump() {
-        guard let layerView, layerView.isSelectMode, kind == .noteLink else { return }
+        guard let layerView, kind == .noteLink else { return }
         layerView.onNoteLinkActivated?(objectID)
     }
 
     @objc private func handleMovePan(_ gesture: UIPanGestureRecognizer) {
-        guard let layerView, layerView.isSelectMode else { return }
+        // 選択済みのオブジェクトだけを移動する(未選択は shouldBegin で弾かれスクロールになる)
+        guard let layerView, layerView.selectedID == objectID else { return }
         switch gesture.state {
         case .began:
             layerView.select(objectID)
@@ -541,7 +573,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     @objc private func handleResizePan(_ gesture: UIPanGestureRecognizer) {
-        guard let layerView, layerView.isSelectMode else { return }
+        // リサイズハンドルは選択中のみ表示されるが、念のため選択中のオブジェクトに限定する
+        guard let layerView, layerView.selectedID == objectID else { return }
         switch gesture.state {
         case .began:
             isInteracting = true
@@ -574,7 +607,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began, let layerView, layerView.isSelectMode else { return }
+        // 指の長押しはツールに関係なく、選択+削除メニューを出せる(hitTest が指タッチを通す)。
+        guard gesture.state == .began, let layerView else { return }
         layerView.select(objectID)
         endTextEditing()
         let config = UIEditMenuConfiguration(
