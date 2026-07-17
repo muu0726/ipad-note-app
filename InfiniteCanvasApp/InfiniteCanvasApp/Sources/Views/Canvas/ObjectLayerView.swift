@@ -179,7 +179,8 @@ final class ObjectLayerUIView: UIView {
         case .began:
             groupMoveStart = [:]
             for id in selectedIDs {
-                if let view = objectViews[id] {
+                // ロック済みメンバーは一括移動から除外(ロックの保護を優先)
+                if let view = objectViews[id], !view.isMovementLocked {
                     groupMoveStart[id] = view.contentFrame
                     view.setInteractingExternally(true)
                 }
@@ -199,9 +200,11 @@ final class ObjectLayerUIView: UIView {
         }
     }
 
-    /// 選択中の全オブジェクトを削除する(グループ/複数選択の一括削除)。
+    /// 選択中の全オブジェクトを削除する(グループ/複数選択の一括削除)。ロック済みは残す。
     func deleteSelection() {
-        for id in selectedIDs { onDelete?(id) }
+        for id in selectedIDs where !(objectViews[id]?.isMovementLocked ?? false) {
+            onDelete?(id)
+        }
         selectedIDs = []
         onSelectionChanged?(false)
     }
@@ -591,6 +594,9 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         let single = layerView?.selectedID == objectID
         resizeHandle.isHidden = !isSelected || !single || isUserLocked
     }
+
+    /// 移動・削除から保護されているか(システム/ユーザーどちらのロックでも)
+    var isMovementLocked: Bool { isLocked || isUserLocked }
 
     /// レイヤー主導の一括移動用: 対話フラグと配置を外部から設定する。
     func setInteractingExternally(_ value: Bool) { isInteracting = value }

@@ -9,13 +9,32 @@ import CoreData
 ///   1. Signing & Capabilities で iCloud (CloudKit) + Background Modes (Remote notifications) を追加
 ///   2. 下の `NSPersistentContainer` を `NSPersistentCloudKitContainer` に変更
 ///   (履歴トラッキング等のオプションは設定済みのため、他の変更は不要)
+
+/// モデル(.momd)を含むバンドルを解決するためのトークン(アプリ/テストどちらのプロセスでも app バンドルを指す)。
+private final class BundleToken {}
+
 struct PersistenceController {
     static let shared = PersistenceController()
+
+    /// Core Data モデルは **1度だけ** ロードして全コンテナで共有する。
+    /// 複数の `NSPersistentContainer(name:)` がそれぞれモデルを読み込むと、生成された
+    /// NSManagedObject サブクラス(`NoteFile` 等)に対して複数の `NSEntityDescription` が
+    /// 名乗りを上げ、`+[NoteFile entity]` が一意に解決できず
+    /// 「Multiple NSEntityDescriptions claim the NSManagedObject subclass」警告や
+    /// 「Failed to find a unique match」エラー(テスト時のクラッシュ/不安定化)の原因になる。
+    /// テストは `PersistenceController(inMemory:)` を多数生成するため、この共有が必須。
+    private static let managedObjectModel: NSManagedObjectModel = {
+        guard let url = Bundle(for: BundleToken.self).url(forResource: "InfiniteCanvas", withExtension: "momd"),
+              let model = NSManagedObjectModel(contentsOf: url) else {
+            fatalError("Core Data モデル 'InfiniteCanvas.momd' が見つかりません")
+        }
+        return model
+    }()
 
     let container: NSPersistentContainer
 
     init(inMemory: Bool = false) {
-        container = NSPersistentContainer(name: "InfiniteCanvas")
+        container = NSPersistentContainer(name: "InfiniteCanvas", managedObjectModel: Self.managedObjectModel)
 
         guard let description = container.persistentStoreDescriptions.first else {
             fatalError("永続ストアの記述が見つかりません")

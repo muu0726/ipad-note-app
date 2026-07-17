@@ -533,6 +533,8 @@ struct NoteCanvasView: View {
         copy.payload = src.payload
         copy.linkedNoteUUID = src.linkedNoteUUID
         copy.isLocked = src.isLocked
+        copy.isUserLocked = src.isUserLocked
+        // parentGroupID は複製しない(コピー同士が元グループと混ざるのを避け、非グループで複製する)
         copy.zOrder = src.zOrder
         copy.contentFrame = src.contentFrame.offsetBy(dx: offset.dx, dy: offset.dy)
         copy.createdAt = .now
