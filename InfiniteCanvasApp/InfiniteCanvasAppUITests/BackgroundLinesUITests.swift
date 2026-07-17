@@ -12,6 +12,8 @@ final class BackgroundLinesUITests: XCTestCase {
     func testSelectLinesBackground() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+
+
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
         app.launch()
 
