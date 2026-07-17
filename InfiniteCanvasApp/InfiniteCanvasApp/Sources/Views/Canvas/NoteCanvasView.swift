@@ -36,6 +36,10 @@ struct NoteCanvasView: View {
     @State private var currentPageIndex = 0
     /// しおり/目次からのジャンプ要求(CanvasRepresentable が処理後 nil へ戻す)
     @State private var scrollToPage: Int?
+    /// 現在のズーム倍率(表示用)
+    @State private var currentZoomScale: CGFloat = 1.0
+    /// ズームロック: true のときピンチズームを禁止する
+    @State private var isZoomLocked = false
 
     init(
         note: NoteFile,
@@ -75,6 +79,7 @@ struct NoteCanvasView: View {
                 isTwoPageLayout: note.isTwoPageLayout,
                 // 通常ノートは横スクロール固定(既存サービス同様のページめくり)
                 isHorizontalScroll: note.canvasNoteType == .paged ? true : note.isHorizontalScroll,
+                isZoomLocked: isZoomLocked,
                 objects: Array(objects),
                 autoFocusObjectID: autoFocusObjectID,
                 initialViewport: session.viewports[note.objectID],
@@ -85,6 +90,12 @@ struct NoteCanvasView: View {
                 },
                 onViewportChanged: { viewport in
                     session.updateViewport(viewport, for: note.objectID)
+                    // ズーム倍率を追跡(左上の倍率表示用)
+                    if viewport.zoomScale > 0 {
+                        let rounded = (viewport.zoomScale * 100).rounded()
+                        let current = (currentZoomScale * 100).rounded()
+                        if rounded != current { currentZoomScale = viewport.zoomScale }
+                    }
                     // 通常ノートは現在ページを追跡(しおりトグル/目次追加の対象・変化時のみ更新)
                     if note.canvasNoteType == .paged, geo.size.width > 0 {
                         let page = PagePlanner.currentPage(
@@ -193,6 +204,20 @@ struct NoteCanvasView: View {
                 if note.canvasNoteType == .paged, note.resolvedPageCount > 1 {
                     deletePageButton
                         .padding(24)
+                }
+            }
+            // ズーム倍率表示 + ロック(左上フローティング)
+            .overlay(alignment: .topLeading) {
+                zoomIndicator
+                    .padding(.leading, 16)
+                    .padding(.top, 12)
+            }
+            // ページナビゲーション(右上フローティング・通常ノートのみ)
+            .overlay(alignment: .topTrailing) {
+                if note.canvasNoteType == .paged {
+                    pageIndicator
+                        .padding(.trailing, 16)
+                        .padding(.top, 12)
                 }
             }
             .alert("最後のページを削除しますか？", isPresented: $showDeletePageConfirm) {
@@ -316,6 +341,75 @@ struct NoteCanvasView: View {
     }
 
     // MARK: - ページ追加(通常ノート)
+
+    // MARK: - ズーム倍率表示 + ロック(左上フローティング)
+
+    /// 現在のズーム倍率をパーセント表示し、鍵アイコンでロック/解除を切り替える。
+    private var zoomIndicator: some View {
+        HStack(spacing: 6) {
+            Text("\(Int((currentZoomScale * 100).rounded()))%")
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+            Button {
+                isZoomLocked.toggle()
+            } label: {
+                Image(systemName: isZoomLocked ? "lock.fill" : "lock.open")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(isZoomLocked ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("canvas-zoom-lock")
+            .accessibilityLabel(isZoomLocked ? "ズームロック解除" : "ズームロック")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.thinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color(.separator), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+    }
+
+    // MARK: - ページナビゲーション(右上フローティング)
+
+    /// 「前へ」「ページ番号」「次へ」を表示する。先頭/末尾では矢印を Disabled にする。
+    private var pageIndicator: some View {
+        HStack(spacing: 4) {
+            Button {
+                scrollToPage = max(0, currentPageIndex - 1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .disabled(currentPageIndex <= 0)
+            .buttonStyle(.plain)
+            .foregroundStyle(currentPageIndex <= 0 ? .tertiary : .primary)
+            .accessibilityIdentifier("canvas-prev-page")
+
+            Text("\(currentPageIndex + 1) / \(note.resolvedPageCount)")
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+                .frame(minWidth: 44)
+
+            Button {
+                scrollToPage = min(note.resolvedPageCount - 1, currentPageIndex + 1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .disabled(currentPageIndex >= note.resolvedPageCount - 1)
+            .buttonStyle(.plain)
+            .foregroundStyle(currentPageIndex >= note.resolvedPageCount - 1 ? .tertiary : .primary)
+            .accessibilityIdentifier("canvas-next-page")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.thinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color(.separator), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+    }
+
+    // MARK: - ページ削除ボタン(右下フローティング)
 
     private var deletePageButton: some View {
         Button { showDeletePageConfirm = true } label: {
@@ -693,13 +787,24 @@ struct NoteCanvasView: View {
         }
     }
 
-    /// 現在のビューポート中央(コンテンツ空間)。未スクロールならキャンバス中央
+    /// 現在のビューポート中央(コンテンツ空間)。未スクロールなら形式ごとの初期位置
     private func insertionCenter(viewSize: CGSize) -> CGPoint {
         if let viewport = session.viewports[note.objectID], viewport.zoomScale > 0 {
             return CGPoint(
                 x: (viewport.contentOffset.x + viewSize.width / 2) / viewport.zoomScale,
                 y: (viewport.contentOffset.y + viewSize.height / 2) / viewport.zoomScale
             )
+        }
+        // ビューポート未取得時のフォールバック: 通常ノートは第1ページの中央、
+        // 無限キャンバスはキャンバス中央(50,000pt)。
+        if note.canvasNoteType == .paged {
+            let layout = PagedLayoutCalculator(
+                pageCount: note.resolvedPageCount,
+                isTwoPageLayout: note.isTwoPageLayout,
+                isHorizontalScroll: true
+            )
+            let firstPage = layout.pageRect(0)
+            return CGPoint(x: firstPage.midX, y: firstPage.midY)
         }
         let half = CanvasRepresentable.canvasSize / 2
         return CGPoint(x: half, y: half)
@@ -758,22 +863,22 @@ struct NoteCanvasView: View {
         let scale = min(1, 480 / max(target.width, target.height))
         let size = CGSize(width: target.width * scale, height: target.height * scale)
         let pageColor = note.canvasPageColor
-        // 蛍光ペンは前面 drawing では不可視(alpha 0)なので、背面ミラー相当を復元して
-        // オブジェクトの「下」に敷き、キャンバスと同じ重なり順で合成する。
+        // 蛍光ペンは前面 drawing では不可視(alpha 0)なので、ミラー相当を復元して
+        // オブジェクトの「上」・前面インクの「下」に敷き、キャンバスと同じ重なり順で合成する。
         let markerDrawing = MarkerLayer.backingDrawing(from: drawing)
         let image = UIGraphicsImageRenderer(size: size).image { ctx in
             pageColor.backgroundUIColor.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
             ctx.cgContext.scaleBy(x: scale, y: scale)
             ctx.cgContext.translateBy(x: -target.minX, y: -target.minY)
-            // 1) 蛍光ペン(背面) → 2) オブジェクト → 3) 前面インク(ペン等)の順で重ねる
+            // 1) オブジェクト → 2) 蛍光ペン → 3) 前面インク(ペン等)の順で重ねる
+            for object in objects where !object.isDeleted {
+                object.drawInThumbnail(pageColor: pageColor)
+            }
             if !markerDrawing.strokes.isEmpty {
                 UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
                     markerDrawing.image(from: target, scale: scale).draw(in: target)
                 }
-            }
-            for object in objects where !object.isDeleted {
-                object.drawInThumbnail(pageColor: pageColor)
             }
             // キャンバスと同様、ダークモードでのインク色自動反転を避けて描き出す
             UITraitCollection(userInterfaceStyle: .light).performAsCurrent {

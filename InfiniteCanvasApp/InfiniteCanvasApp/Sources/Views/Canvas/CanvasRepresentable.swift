@@ -134,6 +134,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let isTwoPageLayout: Bool
     /// 通常ノート: 横スクロール(ページめくり)か
     let isHorizontalScroll: Bool
+    /// ズームロック: true のときピンチズームを禁止する(min/max を現在値に固定)
+    let isZoomLocked: Bool
     let objects: [CanvasObject]
     /// 挿入直後に選択(テキストなら編集開始)するオブジェクト
     let autoFocusObjectID: NSManagedObjectID?
@@ -202,20 +204,30 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.markerBackView.frame = CGRect(origin: .zero, size: size)
         container.objectLayer.frame = CGRect(origin: .zero, size: size)
 
-        // スクロール方向: 横スクロール時のみ横バウンス + ページング、縦スクロール時は縦バウンス
+        // スクロール方向: 横スクロール時のみ横バウンス、縦スクロール時は縦バウンス。
+        // ページスナップは isPagingEnabled ではなく scrollViewWillEndDragging で
+        // カスタム実装する(isPagingEnabled は bounds.width 単位でスナップするが、
+        // 通常ノートはズーム倍率によりページ実幅と画面幅が一致しないため)。
         let horizontal = noteType == .paged && isHorizontalScroll
         canvas.alwaysBounceHorizontal = horizontal
         canvas.alwaysBounceVertical = noteType != .paged || !isHorizontalScroll
-        canvas.isPagingEnabled = horizontal
+        canvas.isPagingEnabled = false
 
         // ズーム倍率: 通常ノートは Goodnotes 風に控えめ、無限キャンバスは広めに許容する
-        switch noteType {
-        case .paged:
-            canvas.minimumZoomScale = 0.5
-            canvas.maximumZoomScale = 3.0
-        case .infinite:
-            canvas.minimumZoomScale = 0.1
-            canvas.maximumZoomScale = 5.0
+        if isZoomLocked {
+            // ズームロック中は min/max を現在値に固定してピンチズームを禁止
+            let locked = canvas.zoomScale
+            canvas.minimumZoomScale = locked
+            canvas.maximumZoomScale = locked
+        } else {
+            switch noteType {
+            case .paged:
+                canvas.minimumZoomScale = 0.5
+                canvas.maximumZoomScale = 3.0
+            case .infinite:
+                canvas.minimumZoomScale = 0.1
+                canvas.maximumZoomScale = 5.0
+            }
         }
 
         // 用紙外(通常ノートのグレー余白)での描画を無効化する。
@@ -513,6 +525,53 @@ struct CanvasRepresentable: UIViewRepresentable {
             }
         }
 
+        /// カスタムページスナップ: ドラッグ終了時にフリック速度とズームを考慮して
+        /// 最寄りのページ左端へスクロールをスナップさせる。
+        /// isPagingEnabled(bounds.width 単位)では通常ノートのページ実幅とズレるため、
+        /// PagePlanner.scrollOffsetX で正確なスナップ先を算出する。
+        func scrollViewWillEndDragging(
+            _ scrollView: UIScrollView,
+            withVelocity velocity: CGPoint,
+            targetContentOffset: UnsafeMutablePointer<CGPoint>
+        ) {
+            guard parent.noteType == .paged, parent.isHorizontalScroll else { return }
+
+            let layout = parent.layout
+            let zoomScale = scrollView.zoomScale
+            let margin = PageMetrics.margin
+            let pageCount = parent.pageCount
+            guard pageCount > 0 else { return }
+
+            // 現在ビューポート中心に最も近いページを取得
+            let currentPage = PagePlanner.currentPage(
+                contentOffsetX: scrollView.contentOffset.x,
+                viewWidth: scrollView.bounds.width,
+                zoomScale: zoomScale,
+                layout: layout
+            )
+
+            // フリック速度に応じて遷移先ページを決定
+            var targetPage = currentPage
+            let velocityThreshold: CGFloat = 0.2
+            if velocity.x > velocityThreshold {
+                targetPage = min(pageCount - 1, currentPage + 1)
+            } else if velocity.x < -velocityThreshold {
+                targetPage = max(0, currentPage - 1)
+            }
+
+            // 目的ページの左端オフセットへスナップ
+            let targetX = PagePlanner.scrollOffsetX(
+                toPage: targetPage,
+                zoomScale: zoomScale,
+                layout: layout,
+                margin: margin
+            )
+            targetContentOffset.pointee = CGPoint(
+                x: targetX,
+                y: scrollView.contentOffset.y
+            )
+        }
+
         /// ズーム時のみ、スナップ閾値用の倍率更新と背景タイルの高解像度化を行う(スクロールには不干渉)。
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             container?.objectLayer.applyZoom(scrollView.zoomScale)
@@ -749,9 +808,9 @@ final class NonFadingTiledLayer: CATiledLayer {
     override class func fadeDuration() -> CFTimeInterval { 0 }
 }
 
-/// 蛍光ペン(マーカー)を「オブジェクトの背面」に描くための非対話ビュー。
+/// 蛍光ペン(マーカー)を「オブジェクトの上・前面インクの下」に描くための非対話ビュー。
 /// 前面の対話キャンバス(全ストロークの正)からマーカー種別だけを抽出したミラーを
-/// `drawing` として受け取り、`ObjectLayerUIView` の下・背景の上に敷く。
+/// `drawing` として受け取り、`ObjectLayerUIView` の上・前面手書きインクの下に敷く。
 ///
 /// コンテンツ全体(最大 100,000²)を1枚では描けないため CATiledLayer で「表示中のタイルだけ」を
 /// 遅延描画する。親スクロールビューがスクロール/ズームで露出させた領域のみ draw(_:) が呼ばれるので、
@@ -803,7 +862,7 @@ final class MarkerBackingView: UIView {
 final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     let canvasView = ObjectAccessibleCanvasView()
     let patternView = BackgroundPatternUIView()
-    /// 蛍光ペンの背面ミラー(オブジェクトレイヤーの下)
+    /// 蛍光ペンのミラー(オブジェクトレイヤーの上・前面インクの下)
     let markerBackView = MarkerBackingView()
     let objectLayer = ObjectLayerUIView()
     /// 描画ジェスチャに差し込むゲート(「開く」ボタン上・用紙外ではインクを始めない)
@@ -862,17 +921,20 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         canvasView.drawingGestureRecognizer.delegate = drawingTouchGate
         addSubview(canvasView)
 
-        // 背景 → オブジェクトの順でキャンバス最背面へ差し込む。
-        // 前面の手書きインク(ペン等)は PKCanvasView 自身が最前面に載せるため、注釈は常にオブジェクトの上。
-        // 蛍光ペンだけは背面ミラー(markerBackView)へ回し、オブジェクトの下に敷く。
-        // z順: 背景(patternView) < 背面マーカー(markerBackView) < オブジェクト(objectLayer) < 前面インク(canvasView 本体)
+        // 背景 → オブジェクト → 蛍光ペンの順でキャンバス最背面へ差し込む。
+        // 前面の手書きインク(ペン等)は PKCanvasView 自身が最前面に載せるため、注釈は常に最上。
+        // 蛍光ペン(markerBackView)はオブジェクトの「上」・前面インクの「下」に敷く。こうすると
+        // PDF・画像(isLocked オブジェクト)の上に引いても消えず、かつ手書き文字の下に回るため
+        // 文字はくっきり保たれる(実際の蛍光ペンと同じ挙動)。描画中(前面キャンバス)と指を離した後
+        // (このミラー)で重なり順が変わらないので「離すと消える」現象も起きない。
+        // z順: 背景(patternView) < オブジェクト(objectLayer) < 蛍光ペン(markerBackView) < 前面インク(canvasView 本体)
         let contentFrame = CGRect(x: 0, y: 0, width: canvasSize, height: canvasSize)
         patternView.frame = contentFrame
         markerBackView.frame = contentFrame
         objectLayer.frame = contentFrame
         canvasView.insertSubview(patternView, at: 0)
-        canvasView.insertSubview(markerBackView, aboveSubview: patternView)
-        canvasView.insertSubview(objectLayer, aboveSubview: markerBackView)
+        canvasView.insertSubview(objectLayer, aboveSubview: patternView)
+        canvasView.insertSubview(markerBackView, aboveSubview: objectLayer)
         canvasView.objectLayer = objectLayer  // 選択モードのタッチ転送先
 
         // オブジェクトのない場所のタップで選択解除(スクロール等の邪魔はしない)

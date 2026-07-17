@@ -154,6 +154,31 @@ struct GraphWebView: UIViewRepresentable {
         .force("collide", d3.forceCollide().radius(function (d) { return radius(d) + 6; }))
         .on("tick", ticked);
 
+      // データ適用のたびに一度だけ全体をビューへ収める(少数/未接続ノードでも右下隅に
+      // 寄らず中央に来るように)。収束(end)まで待つと数秒かかるため、レイアウトが
+      // 形になる短時間後にフィットする。以降 forceCenter が中央を保つ。
+      var fitTimer = null;
+      function scheduleFit() {
+        if (fitTimer) clearTimeout(fitTimer);
+        fitTimer = setTimeout(fitToView, 500);
+      }
+
+      // 全ノードの外接矩形をビューポート中央へフィットさせる(拡大は最大2倍まで)。
+      function fitToView() {
+        if (!nodes.length) return;
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        nodes.forEach(function (n) {
+          if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+          if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+        });
+        var w = window.innerWidth, h = window.innerHeight, pad = 60;
+        var gw = Math.max(maxX - minX, 1), gh = Math.max(maxY - minY, 1);
+        var scale = Math.max(0.15, Math.min((w - pad * 2) / gw, (h - pad * 2) / gh, 2));
+        var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+        var t = d3.zoomIdentity.translate(w / 2 - scale * cx, h / 2 - scale * cy).scale(scale);
+        svg.transition().duration(400).call(zoom.transform, t);
+      }
+
       var nodes = [], links = [];
       var linkSel = linkLayer.selectAll("line");
       var nodeSel = nodeLayer.selectAll("g.node");
@@ -227,6 +252,7 @@ struct GraphWebView: UIViewRepresentable {
         simulation.nodes(nodes);
         simulation.force("link").links(links);
         simulation.alpha(0.9).restart();
+        scheduleFit();                    // レイアウトが形になったら中央フィット
       };
 
       // Swift から呼ばれる: 検索語で強調/減光

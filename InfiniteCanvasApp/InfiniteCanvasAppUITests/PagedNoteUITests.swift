@@ -78,13 +78,17 @@ final class PagedNoteUITests: XCTestCase {
         }
         XCTAssertTrue(added, "オーバースクロールで2ページ目を追加できない")
 
+        // ページ追加に伴うスクロールアニメーションの完了を待つ
+        Thread.sleep(forTimeInterval: 1.0)
+
         // 末尾ページ(2ページ目)にテキストオブジェクトを挿入(削除対象のページに載る)
         let marker = "\(Int.random(in: 10_000_000...99_999_999))"
         app.buttons["toolbar-insert-menu"].tap()
         app.buttons["テキスト"].tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "編集が始まらない")
         app.typeText(marker)
-        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)).tap()
+        // 編集を確定してキーボードを閉じるため、ツールバーのペンツールボタンをタップする
+        app.buttons["toolbar-tool-pen"].tap()
         _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 5)
         let markerView = app.textViews.containing(NSPredicate(format: "value CONTAINS %@", marker)).firstMatch
         XCTAssertTrue(markerView.waitForExistence(timeout: 5), "テキストが末尾ページに置けていない")

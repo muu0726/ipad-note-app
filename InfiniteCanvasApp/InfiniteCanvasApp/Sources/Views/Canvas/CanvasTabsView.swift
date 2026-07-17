@@ -47,7 +47,7 @@ struct CanvasTabsView: View {
                 onFontSizeChange: changeSelectedTextFontSize
             )
             Divider()
-            NoteTabBar()
+            // タブバーは canvasArea 内へ移動。分割時は左右ペインごとに分割表示する。
             canvasArea
         }
         .navigationTitle(session.selectedNote?.displayTitle ?? "")
@@ -119,14 +119,17 @@ struct CanvasTabsView: View {
            let right = resolveNote(session.rightNoteID) {
             splitCanvas(left: left, right: right)
         } else if let note = session.selectedNote {
-            NoteCanvasView(
-                note: note,
-                toolState: toolState,
-                undoBridge: undoBridge,
-                insertion: $pendingInsertion
-            )
-                // タブ切替時はビューを作り直す(ビューポートは session から復元される)
-                .id(note.objectID)
+            VStack(spacing: 0) {
+                NoteTabBar()
+                NoteCanvasView(
+                    note: note,
+                    toolState: toolState,
+                    undoBridge: undoBridge,
+                    insertion: $pendingInsertion
+                )
+                    // タブ切替時はビューを作り直す(ビューポートは session から復元される)
+                    .id(note.objectID)
+            }
         }
     }
 
@@ -134,23 +137,30 @@ struct CanvasTabsView: View {
 
     /// 左右2つの NoteCanvasView をドラッグ可能な間仕切りで並べる。
     /// 左右は別々の NoteFile・Undo 履歴・挿入先を持ち、独立して編集できる。
+    /// タブバーも左右ペインごとに分割し、各ペインの真上に配置する(分割線・幅に追従)。
     private func splitCanvas(left: NoteFile, right: NoteFile) -> some View {
         GeometryReader { geo in
             let handleWidth: CGFloat = 12
             let available = max(0, geo.size.width - handleWidth)
             let leftWidth = available * session.splitDividerRatio
             HStack(spacing: 0) {
-                splitPane(note: left, side: .left,
-                          bridge: leftUndoBridge, toolState: leftToolState, insertion: $leftInsertion)
-                    .frame(width: leftWidth)
+                VStack(spacing: 0) {
+                    SideTabBar(side: .left)
+                    splitPane(note: left, side: .left,
+                              bridge: leftUndoBridge, toolState: leftToolState, insertion: $leftInsertion)
+                }
+                .frame(width: leftWidth)
                 SplitDividerHandle(
                     ratio: $session.splitDividerRatio,
                     totalWidth: geo.size.width,
                     handleWidth: handleWidth
                 )
-                splitPane(note: right, side: .right,
-                          bridge: rightUndoBridge, toolState: rightToolState, insertion: $rightInsertion)
-                    .frame(width: max(0, available - leftWidth))
+                VStack(spacing: 0) {
+                    SideTabBar(side: .right)
+                    splitPane(note: right, side: .right,
+                              bridge: rightUndoBridge, toolState: rightToolState, insertion: $rightInsertion)
+                }
+                .frame(width: max(0, available - leftWidth))
             }
         }
     }
@@ -326,6 +336,49 @@ struct NoteTabBar: View {
     }
 }
 
+/// 分割時に各ペインの真上へ置くタブバー。全開タブを並べ、その側に表示中のノートを
+/// キャンバスと一体化した色でハイライトする。タブのタップでその側のノートを差し替える。
+struct SideTabBar: View {
+    @EnvironmentObject private var session: OpenNotesSession
+    let side: SplitSide
+
+    private var sideNoteID: NSManagedObjectID? {
+        side == .left ? session.leftNoteID : session.rightNoteID
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 3) {
+                    ForEach(session.notes(on: side)) { note in
+                        NoteTabChip(
+                            note: note,
+                            isSelected: note.objectID == sideNoteID,
+                            isSplitActive: session.isSplitActive,
+                            onSelect: { session.open(note, on: side) },
+                            onClose: { session.close(note) },
+                            onOpenRight: { session.openRight(note) },
+                            onCloseSplit: { session.closeSplit(keeping: note) }
+                        )
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
+            }
+            // ライブラリから別のノートを選び、この側で開く
+            Button {
+                session.activateSide(side)
+                session.showLibrary()
+            } label: {
+                Image(systemName: "plus")
+                    .padding(10)
+            }
+        }
+        .background(Color(.secondarySystemBackground))
+        .accessibilityIdentifier(side == .left ? "side-tabbar-left" : "side-tabbar-right")
+    }
+}
+
 /// ノートリンク挿入時に、リンク先のノートを一覧から選ぶシート。
 /// ゴミ箱以外の全ノートを表示し、現在のノートは除外する。
 struct NoteLinkPickerView: View {
@@ -403,16 +456,19 @@ private struct NoteTabChip: View {
         .onTapGesture(perform: onSelect)
         .accessibilityIdentifier("note-tab-\(note.displayTitle)")
         .contextMenu {
-            Button {
-                onOpenRight()
-            } label: {
-                Label("右側で開く", systemImage: "rectangle.righthalf.inset.filled")
-            }
+            // 分割していないときだけ「右側で開く」を出す(分割中は冗長なので
+            // 代わりに「分割を解除」を出す)。
             if isSplitActive {
                 Button {
                     onCloseSplit()
                 } label: {
                     Label("分割を解除", systemImage: "rectangle")
+                }
+            } else {
+                Button {
+                    onOpenRight()
+                } label: {
+                    Label("右側で開く", systemImage: "rectangle.righthalf.inset.filled")
                 }
             }
             Divider()

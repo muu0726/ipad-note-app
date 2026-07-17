@@ -21,24 +21,33 @@ struct PenToolbarView: View {
     var body: some View {
         HStack(spacing: 0) {
             if !isCollapsed {
-                undoRedoButtons
-                barDivider
-                toolButtons
-                barDivider
-                shapeAssistButton
-                // テキスト選択中はフォントサイズ変更UIを差し込む
-                if toolState.isSelectMode, toolState.selectedTextObject != nil {
-                    barDivider
-                    fontSizeControl
+                // 狭い端末(iPad mini など)でも全コントロールへ到達できるよう横スクロールでラップ。
+                // 溢れても右端の項目(色・挿入)がクリップされて操作不能になることを防ぐ。
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        undoRedoButtons
+                        barDivider
+                        toolButtons
+                        barDivider
+                        shapeAssistButton
+                        // テキスト選択中はフォントサイズ変更UIを差し込む
+                        if toolState.isSelectMode, toolState.selectedTextObject != nil {
+                            barDivider
+                            fontSizeControl
+                        }
+                        barDivider
+                        widthControl
+                        barDivider
+                        colorPalette
+                        barDivider
+                        insertMenu
+                    }
                 }
-                barDivider
-                widthControl
-                barDivider
-                colorPalette
-                barDivider
-                insertMenu
+                .frame(height: 34)   // コントロール群の高さに固定(縦へ広がらないように)
+            } else {
+                Spacer(minLength: 8)
             }
-            Spacer(minLength: 8)
+            // 折りたたみボタンは常に右端に固定(スクロールで流れて消えないように分離)
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) { isCollapsed.toggle() }
             } label: {

@@ -30,6 +30,14 @@ final class OpenNotesSession: ObservableObject {
     @Published var splitDividerRatio: CGFloat = 0.5
     /// ツールバー(Undo/Redo・挿入)が作用する側
     @Published var activeSide: SplitSide = .left
+    /// 分割中のタブの所属側(未登録=左)。各ペインのタブバーは自分の側のタブだけを出す。
+    /// 分割開始時は「右へ移したノート」だけ .right にし、残りは左に置く(タブは複製しない)。
+    @Published var noteSides: [NSManagedObjectID: SplitSide] = [:]
+
+    /// 指定側に属する、開いているノート(タブバー表示用)。未登録は左側に属する。
+    func notes(on side: SplitSide) -> [NoteFile] {
+        openNotes.filter { (noteSides[$0.objectID] ?? .left) == side }
+    }
     /// タブごとのビューポート(スクロール位置・ズーム)。
     /// 描画のたびに更新されるため @Published にはしない(再描画ループ防止)
     var viewports: [NSManagedObjectID: CanvasViewport] = [:]
@@ -59,12 +67,30 @@ final class OpenNotesSession: ObservableObject {
     /// ノートをタブで開く。既に開いていればそのタブへ切り替える(重複タブは作らない)。
     /// 分割中はアクティブ側のノートを差し替える。
     func open(_ note: NoteFile) {
-        if !openNotes.contains(note) {
-            openNotes.append(note)
-        }
+        let isNewTab = !openNotes.contains(note)
+        if isNewTab { openNotes.append(note) }
         if isSplitActive {
-            assignActiveSide(note)
+            // 既存タブはいまの所属側のまま表示する(ライブラリ/グラフ/サイドバー経由で開いても
+            // 側を移動させない)。新規タブだけをアクティブ側へ載せる。これをしないと、すべての
+            // ノート経由で開くたびに左のタブがアクティブ側(通常は右)へ吸い寄せられ、右へ集まる。
+            let side: SplitSide = isNewTab ? activeSide : (noteSides[note.objectID] ?? .left)
+            noteSides[note.objectID] = side
+            if side == .left { leftNoteID = note.objectID } else { rightNoteID = note.objectID }
+            activeSide = side
         }
+        selectedNote = note
+        isCanvasVisible = true
+        persistState()
+    }
+
+    /// 分割中、指定した側にノートを表示する(その側をアクティブにして差し替える)。
+    /// 分割タブバーのタブタップから呼ぶ。分割していないときは通常オープンにフォールバックする。
+    func open(_ note: NoteFile, on side: SplitSide) {
+        guard isSplitActive else { open(note); return }
+        if !openNotes.contains(note) { openNotes.append(note) }
+        noteSides[note.objectID] = side
+        if side == .left { leftNoteID = note.objectID } else { rightNoteID = note.objectID }
+        activeSide = side
         selectedNote = note
         isCanvasVisible = true
         persistState()
@@ -72,14 +98,25 @@ final class OpenNotesSession: ObservableObject {
 
     func close(_ note: NoteFile) {
         guard let index = openNotes.firstIndex(of: note) else { return }
+        let closedSide: SplitSide? = isSplitActive
+            ? (note.objectID == leftNoteID ? .left : (note.objectID == rightNoteID ? .right : nil))
+            : nil
         openNotes.remove(at: index)
+        noteSides[note.objectID] = nil
 
-        // 分割中に片側のノートを閉じたら、もう片方の全画面表示へ畳む
-        if isSplitActive, note.objectID == leftNoteID || note.objectID == rightNoteID {
-            let survivingID = note.objectID == leftNoteID ? rightNoteID : leftNoteID
-            let surviving = survivingID.flatMap { id in openNotes.first { $0.objectID == id } }
-            deactivateSplit()
-            selectedNote = surviving ?? openNotes.last
+        if let side = closedSide {
+            // 分割中に「表示中のタブ」を閉じた側は、同じ側の別タブへ切り替える。
+            // その側にタブが残っていなければ分割を解除し、もう片方を全画面にする。
+            let wasSelected = selectedNote == note
+            if let next = notes(on: side).first {
+                if side == .left { leftNoteID = next.objectID } else { rightNoteID = next.objectID }
+                if wasSelected { activeSide = side; selectedNote = next }
+            } else {
+                let survivingID = side == .left ? rightNoteID : leftNoteID
+                let surviving = survivingID.flatMap { id in openNotes.first { $0.objectID == id } }
+                deactivateSplit()
+                selectedNote = surviving ?? openNotes.last
+            }
         } else if selectedNote == note {
             // 閉じたタブの右隣(なければ末尾)を選択
             selectedNote = openNotes.indices.contains(index) ? openNotes[index] : openNotes.last
@@ -120,6 +157,9 @@ final class OpenNotesSession: ObservableObject {
             return
         }
         if !openNotes.contains(note) { openNotes.append(note) }
+        // 右のタブバーには「右へ移したノートだけ」を入れる。残りは全て左側に属させる
+        // (タブを左右で複製しない)。
+        noteSides = [note.objectID: .right]
         leftNoteID = current.objectID
         rightNoteID = note.objectID
         isSplitActive = true
@@ -157,12 +197,7 @@ final class OpenNotesSession: ObservableObject {
         leftNoteID = nil
         rightNoteID = nil
         activeSide = .left
-    }
-
-    /// アクティブ側のノートIDを差し替える(内部用)
-    private func assignActiveSide(_ note: NoteFile) {
-        if activeSide == .left { leftNoteID = note.objectID }
-        else { rightNoteID = note.objectID }
+        noteSides = [:]
     }
 
     /// タブを維持したままライブラリへ戻る
