@@ -47,8 +47,9 @@ final class TodoUITests: XCTestCase {
     private func launchAndOpenNote() -> XCUIApplication {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
-        let backToLibrary = app.buttons["書類"]
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
         if !backToLibrary.waitForExistence(timeout: 3) {
             let anyNote = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier BEGINSWITH 'grid-note-'")).firstMatch
@@ -70,7 +71,14 @@ final class TodoUITests: XCTestCase {
             ? app.buttons["toolbar-insert-todo"]
             : app.buttons["Todoリスト"]
         XCTAssertTrue(item.waitForExistence(timeout: 3), "挿入メニューに Todoリストがない")
-        item.tap()
+        item.tap()  // Todo 配置ツールを選択
+        // 配置ツール: キャンバス中央をタップして Todo を配置する
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // 配置直後は選択・編集状態。シミュレータではプログラム的フォーカスに
+        // ソフトキーボードが追従しないため、配置した Todo の行を一度タップして編集を開始する。
+        let placedRow = app.textFields.firstMatch
+        XCTAssertTrue(placedRow.waitForExistence(timeout: 5), "Todo が配置されない")
+        placedRow.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "Todo の編集が始まらない")
         app.typeText(marker)
     }

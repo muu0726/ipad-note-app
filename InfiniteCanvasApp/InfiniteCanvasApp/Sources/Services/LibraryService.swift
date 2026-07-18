@@ -28,6 +28,7 @@ enum LibraryService {
         folder: Folder?,
         pageColor: CanvasPageColor = .white,
         noteType: CanvasNoteType = .infinite,
+        backgroundStyle: CanvasBackgroundStyle = .dots,
         in context: NSManagedObjectContext
     ) -> NoteFile {
         let note = NoteFile(context: context)
@@ -38,6 +39,7 @@ enum LibraryService {
         note.folder = folder
         note.pageColor = pageColor.rawValue
         note.noteType = noteType.rawValue
+        note.backgroundStyle = backgroundStyle.rawValue
         note.pageCount = 1  // 通常ノートは1ページから開始
         note.isHorizontalScroll = (noteType == .paged)  // 通常ノートは横スクロール固定
         save(context)

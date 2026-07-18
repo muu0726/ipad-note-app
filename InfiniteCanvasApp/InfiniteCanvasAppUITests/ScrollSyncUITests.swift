@@ -17,6 +17,7 @@ final class ScrollSyncUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         try openAnyNote(app)
         setGridBackground(app)
@@ -45,15 +46,22 @@ final class ScrollSyncUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         try openAnyNote(app)
 
         // テキストオブジェクトを挿入 → 挿入直後は選択枠が表示され、編集キーボードが出る。
         // オブジェクトがスクロールビュー内部でも描画・フォーカスされることを確認する。
-        app.buttons["toolbar-insert-menu"].tap()
-        let insertText = app.buttons["テキスト"]
-        XCTAssertTrue(insertText.waitForExistence(timeout: 3), "挿入メニューが開かない")
+        let insertText = app.buttons["toolbar-tool-text"]
+        XCTAssertTrue(insertText.waitForExistence(timeout: 3), "テキストツールが無い")
         insertText.tap()
+        // テキストは配置ツール: キャンバス中央をタップして配置する
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // 配置直後は選択・編集状態。シミュレータではプログラム的フォーカスに
+        // ソフトキーボードが追従しないため、配置したテキストを一度タップして編集を開始する。
+        let placedText = app.textViews.firstMatch
+        XCTAssertTrue(placedText.waitForExistence(timeout: 5), "テキストが配置されない")
+        placedText.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "テキスト編集(becomeFirstResponder)が始まらない")
         attachScreenshot(app, name: "1-text-object-inserted-and-editing")
@@ -94,8 +102,10 @@ final class ScrollSyncUITests: XCTestCase {
 
     @MainActor
     private func openAnyNote(_ app: XCUIApplication) throws {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { return }
+        // キャンバスが開いているかは、ツールバー(ペンツール)の有無で判定する
+        // (旧「書類」戻るボタンはツールバー刷新で廃止された)。
+        let inCanvas = app.buttons["toolbar-tool-pen"]
+        if inCanvas.waitForExistence(timeout: 3) { return }
         let anyNote = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'grid-note-'")).firstMatch
         if anyNote.waitForExistence(timeout: 5) {
@@ -106,6 +116,6 @@ final class ScrollSyncUITests: XCTestCase {
             XCTAssertTrue(confirmCreate.waitForExistence(timeout: 5), "作成シートが開かない")
             confirmCreate.tap()
         }
-        XCTAssertTrue(backToLibrary.waitForExistence(timeout: 5), "ノートが開かない")
+        XCTAssertTrue(inCanvas.waitForExistence(timeout: 5), "ノートが開かない")
     }
 }

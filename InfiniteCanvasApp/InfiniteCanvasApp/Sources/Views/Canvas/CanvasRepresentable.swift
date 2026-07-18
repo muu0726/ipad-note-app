@@ -83,34 +83,6 @@ struct PagedLayoutCalculator: Equatable {
     var scrollsHorizontally: Bool { isHorizontalScroll }
 }
 
-/// 蛍光ペン(マーカー)の前面/背面表現を橋渡しするユーティリティ。
-/// 前面キャンバス(全ストロークの正)ではマーカーを alpha 0 で不可視にして持ち、
-/// オブジェクト背面の描画ミラーへは元の不透明度で描き直す。
-enum MarkerLayer {
-    /// 前面 drawing からマーカー種別のストロークだけを抜き出し、不透明度を戻した背面用 drawing。
-    /// 前面での消しゴム(マスク)や移動はストロークごと反映されるので、mask/path はそのまま引き継ぐ。
-    static func backingDrawing(from full: PKDrawing) -> PKDrawing {
-        let markers = full.strokes.compactMap { stroke -> PKStroke? in
-            guard stroke.ink.inkType == .marker else { return nil }
-            var restored = stroke
-            restored.ink = PKInk(.marker, color: stroke.ink.color.withAlphaComponent(PenToolState.markerAlpha))
-            return restored
-        }
-        return PKDrawing(strokes: markers)
-    }
-
-    /// マーカーストロークを前面で不可視化(alpha 0)したコピー。inkType は marker のまま保つ。
-    static func hidden(_ stroke: PKStroke) -> PKStroke {
-        var hidden = stroke
-        hidden.ink = PKInk(.marker, color: stroke.ink.color.withAlphaComponent(0))
-        return hidden
-    }
-
-    /// ストロークが「まだ前面で可視のマーカー」(=描き終えた直後で背面へ回す必要がある)か。
-    static func isVisibleMarker(_ stroke: PKStroke) -> Bool {
-        stroke.ink.inkType == .marker && stroke.ink.color.cgColor.alpha > 0.01
-    }
-}
 
 /// PKCanvasView を「巨大キャンバス + ズーム」として構成する UIViewRepresentable。
 /// PKCanvasView は UIScrollView のサブクラスなので、巨大な contentSize と
@@ -122,6 +94,11 @@ struct CanvasRepresentable: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     let pkTool: PKTool
     let isSelectMode: Bool
+    /// タップ位置配置モードのツール(.text / .todo)。nil のときは通常(描画/選択)。
+    let placementTool: CanvasTool?
+    /// 配置モードでキャンバスをタップしたとき(ツール, コンテンツ座標)。
+    /// オブジェクトを同期生成して item を返す(nil で配置なし)。
+    let onPlaceObject: (CanvasTool, CGPoint) -> CanvasObjectItem?
     /// 図形認識アシスト(要件): 描き終えたストロークを直線・楕円・矩形へ自動置換するか
     let isShapeAssistEnabled: Bool
     let backgroundStyle: CanvasBackgroundStyle
@@ -174,6 +151,10 @@ struct CanvasRepresentable: UIViewRepresentable {
     let scrollToPage: Int?
     /// ジャンプを処理したら呼ぶ(要求元が nil へ戻す)
     let onScrollHandled: () -> Void
+    /// ズームを 100% に戻して中央へ寄せる要求(左上バッジのメニューから)。
+    let resetZoomRequested: Bool
+    /// リセットを処理したら呼ぶ(要求元が false へ戻す)
+    let onZoomResetHandled: () -> Void
 
     /// 通常ノートのページ配置電卓(見開き × スクロール方向)
     private var layout: PagedLayoutCalculator {
@@ -201,7 +182,6 @@ struct CanvasRepresentable: UIViewRepresentable {
         let canvas = container.canvasView
         canvas.contentSize = size
         container.patternView.frame = CGRect(origin: .zero, size: size)
-        container.markerBackView.frame = CGRect(origin: .zero, size: size)
         container.objectLayer.frame = CGRect(origin: .zero, size: size)
 
         // スクロール方向: 横スクロール時のみ横バウンス、縦スクロール時は縦バウンス。
@@ -222,11 +202,14 @@ struct CanvasRepresentable: UIViewRepresentable {
         } else {
             switch noteType {
             case .paged:
-                canvas.minimumZoomScale = 0.5
+                // 最小ズームは「用紙1枚がスクロール横断方向に画面へフィットする倍率」。
+                // これ未満に縮小すると隣ページや余白が露出するため下限にする(固定 0.5 を廃止)。
                 canvas.maximumZoomScale = 3.0
+                canvas.minimumZoomScale = min(pagedMinimumZoom(for: canvas), canvas.maximumZoomScale)
             case .infinite:
                 canvas.minimumZoomScale = 0.1
-                canvas.maximumZoomScale = 5.0
+                // フリーボードに合わせて上限 400%
+                canvas.maximumZoomScale = 4.0
             }
         }
 
@@ -250,8 +233,6 @@ struct CanvasRepresentable: UIViewRepresentable {
         let container = CanvasContainerUIView()
         let canvas = container.canvasView
         canvas.drawing = drawing
-        // 保存済み drawing に含まれるマーカー(前面では alpha 0)を背面ミラーへ復元描画する
-        container.markerBackView.drawing = MarkerLayer.backingDrawing(from: drawing)
         context.coordinator.lastStrokeCount = drawing.strokes.count
         context.coordinator.seedPreviousDrawing(drawing)
         canvas.tool = pkTool
@@ -330,7 +311,6 @@ struct CanvasRepresentable: UIViewRepresentable {
             // 復元したズームをスナップ閾値・背景タイル解像度へ反映
             container.objectLayer.applyZoom(canvas.zoomScale)
             container.patternView.applyZoom(canvas.zoomScale)
-            container.markerBackView.applyZoom(canvas.zoomScale)
         }
         return container
     }
@@ -340,21 +320,40 @@ struct CanvasRepresentable: UIViewRepresentable {
         noteType == .paged ? .systemGray5 : pageColor.backgroundUIColor
     }
 
-    /// ページを画面に収まるようズームフィットし、先頭ページへ寄せる。
-    /// 縦スクロール: 横断=幅をフィット。横スクロール: 横断=高さ(1ページ分)をフィット。
+    /// 通常ノートの最小ズーム = 「1ユニット(1ページ or 2ページ見開き)」全体が画面に綺麗に
+    /// 収まるフィット倍率。既存ノートアプリ準拠の全体フィット。
+    /// bounds 未確定(=0)のときは下限 0.5 にフォールバックする。
+    private func pagedMinimumZoom(for canvas: PKCanvasView) -> CGFloat {
+        let bounds = canvas.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return 0.5 }
+        let unitWidth: CGFloat
+        let unitHeight = PageMetrics.height
+        if isTwoPageLayout {
+            // 横スクロールの見開きは2枚密着(gap なし)、縦スクロールは gap ありの2列
+            unitWidth = 2 * PageMetrics.width + (isHorizontalScroll ? 0 : PageMetrics.gap)
+        } else {
+            unitWidth = PageMetrics.width
+        }
+        let availW = max(1, bounds.width - PageMetrics.margin * 2)
+        let availH = max(1, bounds.height - PageMetrics.margin * 2)
+        return min(availW / unitWidth, availH / unitHeight)
+    }
+
+    /// ページを画面に収まるようズームフィットし、先頭ページを中央に置く。
+    /// フィット倍率は `pagedMinimumZoom`(= 最小ズーム)をそのまま使う(マジックナンバー 0.94 は廃止)。
     private func fitPaged(_ canvas: PKCanvasView) {
         let bounds = canvas.bounds
         guard bounds.width > 0, bounds.height > 0 else { return }
-        let size = contentSize
+        let fit = min(canvas.maximumZoomScale, max(canvas.minimumZoomScale, pagedMinimumZoom(for: canvas)))
+        canvas.zoomScale = fit
         if isHorizontalScroll {
-            let fit = min(canvas.maximumZoomScale,
-                          max(canvas.minimumZoomScale, bounds.height * 0.94 / size.height))
-            canvas.zoomScale = fit
-            canvas.contentOffset = CGPoint(x: -PageMetrics.margin, y: canvas.contentOffset.y)
+            // 先頭ページも中央寄せ(スナップと同じ算出でズレを無くす)
+            let offsetX = PagePlanner.scrollOffsetX(
+                toPage: 0, zoomScale: fit, layout: layout,
+                margin: PageMetrics.margin, viewWidth: bounds.width
+            )
+            canvas.contentOffset = CGPoint(x: offsetX, y: canvas.contentOffset.y)
         } else {
-            let fit = min(canvas.maximumZoomScale,
-                          max(canvas.minimumZoomScale, bounds.width * 0.94 / size.width))
-            canvas.zoomScale = fit
             canvas.contentOffset = CGPoint(x: canvas.contentOffset.x, y: -PageMetrics.margin)
         }
     }
@@ -388,6 +387,10 @@ struct CanvasRepresentable: UIViewRepresentable {
         canvas.tool = pkTool
         container.backgroundColor = containerBackgroundColor
         container.isSelectMode = isSelectMode
+        // タップ位置配置モード(テキスト/Todo): 手書きジェスチャを止めてタップ配置に切り替える。
+        container.placementTool = placementTool
+        container.onPlaceObject = onPlaceObject
+        canvas.drawingGestureRecognizer.isEnabled = (placementTool == nil)
         container.objectLayer.backgroundStyle = backgroundStyle
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)  // 背景スタイル・用紙色・ページ数・レイアウトの変化を反映
@@ -406,11 +409,14 @@ struct CanvasRepresentable: UIViewRepresentable {
                 container.patternView.applyZoom(canvas.zoomScale)
             }
         } else if noteType == .paged, pageCount > context.coordinator.lastPageCount {
-            // ページが増えたら、新しいページへスクロール方向に沿って滑らかに移動
+            // ページが増えたら、新しいページへスクロール方向に沿って滑らかに移動(中央寄せ)
             centerPagedContent(canvas)
             let lastRect = layout.pageRect(pageCount - 1)
             let target: CGPoint = isHorizontalScroll
-                ? CGPoint(x: lastRect.minX * canvas.zoomScale - PageMetrics.margin, y: canvas.contentOffset.y)
+                ? CGPoint(x: PagePlanner.scrollOffsetX(toPage: pageCount - 1, zoomScale: canvas.zoomScale,
+                                                       layout: layout, margin: PageMetrics.margin,
+                                                       viewWidth: canvas.bounds.width),
+                          y: canvas.contentOffset.y)
                 : CGPoint(x: canvas.contentOffset.x, y: lastRect.minY * canvas.zoomScale - PageMetrics.margin)
             canvas.setContentOffset(target, animated: true)
             // 追加が反映されたのでオーバースクロール追加のガードを解除(次のめくりで再度追加可能)
@@ -425,11 +431,47 @@ struct CanvasRepresentable: UIViewRepresentable {
             DispatchQueue.main.async {
                 let offsetX = PagePlanner.scrollOffsetX(
                     toPage: target, zoomScale: canvas.zoomScale,
-                    layout: targetLayout, margin: PageMetrics.margin
+                    layout: targetLayout, margin: PageMetrics.margin,
+                    viewWidth: canvas.bounds.width
                 )
-                canvas.setContentOffset(CGPoint(x: offsetX, y: canvas.contentOffset.y), animated: true)
-                self.onScrollHandled()
-                context.coordinator.isScrollPending = false
+                let destination = CGPoint(x: offsetX, y: canvas.contentOffset.y)
+                // 矢印タップ由来のプログラムスクロール中は、PencilKit が座標移動を「長押し」と
+                // 誤検知して手書きメニュー(Select All / Insert Space)を暴発させることがある。
+                // アニメーション中は画面全体の入力を遮断し、完了後に戻す。
+                canvas.isUserInteractionEnabled = false
+                UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) {
+                    canvas.contentOffset = destination
+                } completion: { _ in
+                    canvas.isUserInteractionEnabled = true
+                    self.onScrollHandled()
+                    context.coordinator.isScrollPending = false
+                }
+            }
+        }
+
+        // ズームを 100% に戻して表示を中央へ寄せる(左上バッジのメニューから)
+        if resetZoomRequested {
+            DispatchQueue.main.async {
+                UIView.animate(withDuration: 0.25) {
+                    canvas.zoomScale = 1.0
+                    if noteType == .paged {
+                        self.centerPagedContent(canvas)
+                        let offsetX = PagePlanner.scrollOffsetX(
+                            toPage: 0, zoomScale: 1.0, layout: self.layout,
+                            margin: PageMetrics.margin, viewWidth: canvas.bounds.width
+                        )
+                        canvas.contentOffset = CGPoint(x: offsetX, y: -PageMetrics.margin)
+                    } else {
+                        let size = Self.canvasSize
+                        canvas.contentOffset = CGPoint(
+                            x: (size - canvas.bounds.width) / 2,
+                            y: (size - canvas.bounds.height) / 2
+                        )
+                    }
+                }
+                container.objectLayer.applyZoom(1.0)
+                container.patternView.applyZoom(1.0)
+                self.onZoomResetHandled()
             }
         }
 
@@ -438,8 +480,6 @@ struct CanvasRepresentable: UIViewRepresentable {
         // モデル側から描画が差し替わった場合のみ反映(描画中の上書きを防ぐ)
         if !context.coordinator.isCanvasSourceOfTruth, canvas.drawing != drawing {
             canvas.drawing = drawing
-            // 前面の差し替えに合わせて背面マーカーミラーも作り直す
-            container.markerBackView.drawing = MarkerLayer.backingDrawing(from: drawing)
             // プログラムでの差し替えを新規ストローク追加と誤認しないよう基準数を更新
             context.coordinator.lastStrokeCount = drawing.strokes.count
             context.coordinator.seedPreviousDrawing(drawing)
@@ -559,12 +599,13 @@ struct CanvasRepresentable: UIViewRepresentable {
                 targetPage = max(0, currentPage - 1)
             }
 
-            // 目的ページの左端オフセットへスナップ
+            // 目的ページを中央(収まる場合)/左マージン(超える場合)へスナップ
             let targetX = PagePlanner.scrollOffsetX(
                 toPage: targetPage,
                 zoomScale: zoomScale,
                 layout: layout,
-                margin: margin
+                margin: margin,
+                viewWidth: scrollView.bounds.width
             )
             targetContentOffset.pointee = CGPoint(
                 x: targetX,
@@ -576,7 +617,6 @@ struct CanvasRepresentable: UIViewRepresentable {
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             container?.objectLayer.applyZoom(scrollView.zoomScale)
             container?.patternView.applyZoom(scrollView.zoomScale)
-            container?.markerBackView.applyZoom(scrollView.zoomScale)
             // 通常ノートはズームしてもページを横断方向の中央に保つ(グレー余白を調整)
             if parent.noteType == .paged, let canvas = container?.canvasView,
                let inset = parent.pagedContentInset(for: canvas) {
@@ -590,26 +630,6 @@ struct CanvasRepresentable: UIViewRepresentable {
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             // プログラムによる置換実行中の再入(drawing 差し替え/undo による通知)は完全にスキップ。
             if isReplacingDrawing { return }
-
-            // 蛍光ペンの背面化: 描き終えた「1本だけ増えた」マーカーを前面では不可視(alpha 0)にし、
-            // オブジェクトレイヤー下の背面ミラーへ回す。図形アシストより先に判定する
-            // (マーカーは図形置換の対象にしない)。Undo で完全に消え、Redo で復元する。
-            if canvasView.drawing.strokes.count == lastStrokeCount + 1,
-               let last = canvasView.drawing.strokes.last,
-               MarkerLayer.isVisibleMarker(last) {
-                let oldDrawing = previousDrawing  // マーカーが追加される前の描画
-                var newDrawing = canvasView.drawing
-                newDrawing.strokes[newDrawing.strokes.count - 1] = MarkerLayer.hidden(last)
-
-                // PencilKit が自動登録した「マーカー追加」の Undo を取り消し、置換のみを1手にする。
-                isReplacingDrawing = true
-                canvasView.undoManager?.undo()
-                isReplacingDrawing = false
-
-                // 前面は不可視マーカー入り、背面ミラーは可視で、双方向 Undo/Redo を成立させて置換。
-                replaceDrawingWithUndoSupport(canvasView, to: newDrawing, from: oldDrawing)
-                return
-            }
 
             // 図形認識アシスト: 直前に「1本だけ増えた」インクストロークを図形へ置換する。
             // 消しゴム(ストローク分割で数が増減)や選択操作を巻き込まないよう
@@ -641,18 +661,11 @@ struct CanvasRepresentable: UIViewRepresentable {
             }
             previousDrawing = canvasView.drawing
             lastStrokeCount = canvasView.drawing.strokes.count
-            // 消しゴム・投げ縄などで前面マーカーが変化した可能性があるので背面ミラーを追従させる
-            updateMarkerBackLayer(canvasView.drawing)
 
             isCanvasSourceOfTruth = true
             parent.drawing = canvasView.drawing
             parent.onDrawingChanged()
             isCanvasSourceOfTruth = false
-        }
-
-        /// 前面 drawing のマーカー種別だけを抽出し、不透明度を戻して背面ミラーへ反映する。
-        private func updateMarkerBackLayer(_ full: PKDrawing) {
-            container?.markerBackView.drawing = MarkerLayer.backingDrawing(from: full)
         }
 
         /// 双方向の Undo/Redo をサポートしながら CanvasView の描画を置換する。
@@ -669,8 +682,6 @@ struct CanvasRepresentable: UIViewRepresentable {
             defer { isReplacingDrawing = false }
 
             canvasView.drawing = nextDrawing
-            // 前面の置換(マーカー背面化・図形置換・その Undo/Redo)に合わせて背面ミラーも更新
-            updateMarkerBackLayer(nextDrawing)
 
             // 状態の同期と変更イベントの発火
             isCanvasSourceOfTruth = true
@@ -758,8 +769,8 @@ struct CanvasRepresentable: UIViewRepresentable {
         @MainActor
         func handleAutoFocus(in layer: ObjectLayerUIView) {
             guard let id = parent.autoFocusObjectID, id != autoFocusHandledID else { return }
-            autoFocusHandledID = id
-            layer.focus(on: id)
+            // ビュー生成前(挿入直後の @FetchRequest 未反映)は false。処理済みにせず次の更新で再試行。
+            if layer.focus(on: id) { autoFocusHandledID = id }
         }
     }
 }
@@ -803,70 +814,19 @@ final class ObjectAccessibleCanvasView: PKCanvasView {
     }
 }
 
-/// フェードのちらつきを抑えた CATiledLayer。
-final class NonFadingTiledLayer: CATiledLayer {
-    override class func fadeDuration() -> CFTimeInterval { 0 }
-}
-
-/// 蛍光ペン(マーカー)を「オブジェクトの上・前面インクの下」に描くための非対話ビュー。
-/// 前面の対話キャンバス(全ストロークの正)からマーカー種別だけを抽出したミラーを
-/// `drawing` として受け取り、`ObjectLayerUIView` の上・前面手書きインクの下に敷く。
-///
-/// コンテンツ全体(最大 100,000²)を1枚では描けないため CATiledLayer で「表示中のタイルだけ」を
-/// 遅延描画する。親スクロールビューがスクロール/ズームで露出させた領域のみ draw(_:) が呼ばれるので、
-/// 巨大キャンバスでも破綻せず、スクロール同期のラグも生じない(背景パターンと同じくコンテンツ座標に固定)。
-final class MarkerBackingView: UIView {
-    override class var layerClass: AnyClass { NonFadingTiledLayer.self }
-
-    /// 背面に描くマーカー(不透明度は復元済み)。変更で再描画する。
-    var drawing = PKDrawing() {
-        didSet { setNeedsDisplay() }
-    }
-
-    /// ズームに応じたタイルの描画解像度(拡大時に線がボケないよう倍率を上げる)。
-    private var renderScale: CGFloat = UIScreen.main.scale
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false   // 入力は前面キャンバスが受ける(ここは描画専用)
-        backgroundColor = .clear
-        isOpaque = false
-        if let tiled = layer as? CATiledLayer {
-            tiled.tileSize = CGSize(width: 1024, height: 1024)
-            tiled.levelsOfDetail = 1
-            tiled.levelsOfDetailBias = 0
-        }
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    /// ズーム時に呼ばれ、拡大率に見合う解像度でタイルを焼き直す(背景パターンと同方針)。
-    func applyZoom(_ zoom: CGFloat) {
-        let target = min(max(UIScreen.main.scale * zoom, UIScreen.main.scale), 12)
-        guard abs(target - renderScale) > 0.5 else { return }
-        renderScale = target
-        setNeedsDisplay()
-    }
-
-    override func draw(_ rect: CGRect) {
-        guard !drawing.strokes.isEmpty else { return }
-        // rect は今から描くタイル(コンテンツ座標)。その部分のマーカーだけを焼いて置く。
-        // ダークモードでのインク色自動反転を避けて描き出す(前面キャンバスと同方針)。
-        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-            drawing.image(from: rect, scale: renderScale).draw(in: rect)
-        }
-    }
-}
-
 final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     let canvasView = ObjectAccessibleCanvasView()
     let patternView = BackgroundPatternUIView()
-    /// 蛍光ペンのミラー(オブジェクトレイヤーの上・前面インクの下)
-    let markerBackView = MarkerBackingView()
     let objectLayer = ObjectLayerUIView()
     /// 描画ジェスチャに差し込むゲート(「開く」ボタン上・用紙外ではインクを始めない)
     let drawingTouchGate = DrawingTouchGate()
+
+    /// タップ位置配置モードのツール(.text / .todo)。nil のとき通常のタップ(選択解除)。
+    var placementTool: CanvasTool?
+    /// 配置モードでキャンバスをタップしたとき(ツール, コンテンツ座標)。
+    /// オブジェクトを同期生成し、生成したビューを作るための item を返す(nil で配置なし)。
+    /// タップのタッチ文脈内で beginTextEditing まで行うため、ここでオブジェクトを確定させる。
+    var onPlaceObject: ((CanvasTool, CGPoint) -> CanvasObjectItem?)?
 
     /// 画面回転・Split View のリサイズ等で bounds のサイズが変わったときに呼ばれる。
     /// 通常ノートの横断方向センタリング(contentInset)はズーム時にしか再計算されないため、
@@ -921,20 +881,15 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         canvasView.drawingGestureRecognizer.delegate = drawingTouchGate
         addSubview(canvasView)
 
-        // 背景 → オブジェクト → 蛍光ペンの順でキャンバス最背面へ差し込む。
-        // 前面の手書きインク(ペン等)は PKCanvasView 自身が最前面に載せるため、注釈は常に最上。
-        // 蛍光ペン(markerBackView)はオブジェクトの「上」・前面インクの「下」に敷く。こうすると
-        // PDF・画像(isLocked オブジェクト)の上に引いても消えず、かつ手書き文字の下に回るため
-        // 文字はくっきり保たれる(実際の蛍光ペンと同じ挙動)。描画中(前面キャンバス)と指を離した後
-        // (このミラー)で重なり順が変わらないので「離すと消える」現象も起きない。
-        // z順: 背景(patternView) < オブジェクト(objectLayer) < 蛍光ペン(markerBackView) < 前面インク(canvasView 本体)
+        // 背景 → オブジェクトの順でキャンバス最背面へ差し込む。
+        // 前面の手書きインク(ペン・マーカー等)は PKCanvasView 自身が最前面に載せる。
+        // 蛍光ペンは標準 PencilKit マーカーとして前面へ直接描く(背面ミラーは廃止)。
+        // z順: 背景(patternView) < オブジェクト(objectLayer) < 前面インク(canvasView 本体)
         let contentFrame = CGRect(x: 0, y: 0, width: canvasSize, height: canvasSize)
         patternView.frame = contentFrame
-        markerBackView.frame = contentFrame
         objectLayer.frame = contentFrame
         canvasView.insertSubview(patternView, at: 0)
         canvasView.insertSubview(objectLayer, aboveSubview: patternView)
-        canvasView.insertSubview(markerBackView, aboveSubview: objectLayer)
         canvasView.objectLayer = objectLayer  // 選択モードのタッチ転送先
 
         // オブジェクトのない場所のタップで選択解除(スクロール等の邪魔はしない)
@@ -959,7 +914,20 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func handleBackgroundTap(_ gesture: UITapGestureRecognizer) {
-        objectLayer.handleBackgroundTap(at: gesture.location(in: objectLayer))
+        let point = gesture.location(in: objectLayer)
+        // 配置モード(テキスト/Todo): 用紙内(paged)を検証してオブジェクト作成コールバックを発火。
+        // 用紙判定は描画ゲートと同じ isTouchAllowed を再利用する(無限は常に true)。
+        if let tool = placementTool {
+            if drawingTouchGate.isTouchAllowed?(point) ?? true,
+               let item = onPlaceObject?(tool, point) {
+                // タップのタッチ文脈内で生成・編集開始する。
+                // render 経由の autoFocus では becomeFirstResponder がタッチ文脈外になり
+                // ソフトキーボードが表示されないため、ここで同期的に focus する。
+                objectLayer.placeAndFocus(item: item)
+            }
+            return
+        }
+        objectLayer.handleBackgroundTap(at: point)
     }
 
     func gestureRecognizer(
@@ -1051,8 +1019,17 @@ final class BackgroundPatternUIView: UIView {
     private var isConfiguring = false
     /// タイルのレンダリング解像度。ズームインで拡大されても線がボケないよう倍率を上げる
     private var tileScale: CGFloat = UIScreen.main.scale
+    /// 現在のズーム倍率(無限キャンバスのダイナミックグリッド用)
+    private var currentZoom: CGFloat = 1.0
     /// paged 用のページビュー(1枚 = 1ページ)
     private var pageViews: [UIView] = []
+
+    /// 無限キャンバスのグリッド表示帯: 2=通常, 1=広間隔・薄, 0=非表示。
+    private func zoomBand(_ zoom: CGFloat) -> Int {
+        if zoom >= 0.5 { return 2 }
+        if zoom >= 0.15 { return 1 }
+        return 0
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1078,12 +1055,24 @@ final class BackgroundPatternUIView: UIView {
         rebuild()
     }
 
-    /// ズーム時のみ呼ばれ、拡大率に見合う解像度でタイルを焼き直す(スクロールには不干渉)。
+    /// 直近でタイルを焼いたズーム倍率(無限キャンバスの連動スケール判定用)
+    private var lastTileZoom: CGFloat = 1.0
+
+    /// ズーム時に呼ばれ、解像度と(無限キャンバスは)ドット間隔/サイズをズームへ連動させて焼き直す。
     func applyZoom(_ zoom: CGFloat) {
+        // 無限キャンバスは間隔・ドット径・線幅を currentZoom に連動させるため、ズームが一定割合
+        // 変化したら焼き直す(帯跨ぎも含む。過剰再生成を避けるため 10% 閾値)。
+        let zoomChanged = noteType == .infinite
+            && (abs(zoom - lastTileZoom) / max(lastTileZoom, 0.01) > 0.1
+                || zoomBand(zoom) != zoomBand(currentZoom))
+        currentZoom = zoom
         let target = min(max(UIScreen.main.scale * zoom, UIScreen.main.scale), 12)
-        guard abs(target - tileScale) > 0.5 else { return }
-        tileScale = target
-        rebuild()
+        let scaleChanged = abs(target - tileScale) > 0.5
+        if scaleChanged { tileScale = target }
+        if scaleChanged || zoomChanged {
+            lastTileZoom = zoom
+            rebuild()
+        }
     }
 
     private func rebuild() {
@@ -1130,8 +1119,24 @@ final class BackgroundPatternUIView: UIView {
     }
 
     /// 1マス分のタイル画像。タイルには用紙色の下地も含めるので、これ一枚で全面を塗れる。
+    /// 無限キャンバス(フリーボード仕様)は、間隔・ドット径・線幅を現在ズーム(currentZoom)へ
+    /// 連動させて拡大縮小する。50%以上=基本40pt、15〜50%=80pt、15%未満=非表示(背景色のみ)。
     private func makeTile() -> UIImage {
-        let spacing = Self.spacing
+        let base = Self.spacing  // = PageMetrics.width / 20 (=40)
+        let dynamic = (noteType == .infinite)
+        var spacing = base
+        var draw = true
+        if dynamic {
+            switch zoomBand(currentZoom) {
+            case 2: spacing = base * currentZoom
+            case 1: spacing = base * 2 * currentZoom
+            default: spacing = base * currentZoom; draw = false  // 極小は非表示
+            }
+        }
+        spacing = max(2, spacing)  // 0 サイズタイルを避ける
+        let dotSize = dynamic ? max(1.5, 3.0 * currentZoom) : 3.0
+        let lineWidth = dynamic ? max(0.5, 0.5 * currentZoom) : 0.5
+
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = tileScale
         format.opaque = true
@@ -1142,21 +1147,20 @@ final class BackgroundPatternUIView: UIView {
             let c = ctx.cgContext
             pageColor.backgroundUIColor.setFill()
             c.fill(CGRect(x: 0, y: 0, width: spacing, height: spacing))
+            guard draw else { return }  // 極小ズームは背景色のみ
 
             switch style {
             case .grid:
-                // 上辺・左辺を引くと、タイリングで連続した方眼になる
                 pageColor.patternUIColor.setStroke()
-                c.setLineWidth(0.5)
+                c.setLineWidth(lineWidth)
                 c.stroke(CGRect(x: 0, y: 0, width: spacing, height: spacing))
             case .dots:
-                // マス中央にドット(40pt グリッドのドット背景)
                 pageColor.patternUIColor.setFill()
-                c.fillEllipse(in: CGRect(x: spacing / 2 - 1.5, y: spacing / 2 - 1.5, width: 3, height: 3))
+                c.fillEllipse(in: CGRect(x: spacing / 2 - dotSize / 2, y: spacing / 2 - dotSize / 2,
+                                         width: dotSize, height: dotSize))
             case .lines:
-                // 上辺に横線を引くと、タイリングで 40pt 間隔の横罫線になる
                 pageColor.patternUIColor.setStroke()
-                c.setLineWidth(0.5)
+                c.setLineWidth(lineWidth)
                 c.move(to: CGPoint(x: 0, y: 0))
                 c.addLine(to: CGPoint(x: spacing, y: 0))
                 c.strokePath()

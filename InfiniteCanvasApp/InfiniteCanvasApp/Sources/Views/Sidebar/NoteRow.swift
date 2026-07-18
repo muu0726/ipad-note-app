@@ -11,7 +11,7 @@ struct NoteRow: View {
         Button {
             session.open(note)
         } label: {
-            Label(note.displayTitle, systemImage: "doc.richtext")
+            Label(note.displayTitle, systemImage: note.canvasNoteType.icon)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -51,6 +51,11 @@ struct ItemContextMenu: View {
             actions.beginCreateFolder(in: containerFolder)
         } label: {
             Label("新規フォルダ(\(createTitleSuffix))", systemImage: "folder.badge.plus")
+        }
+        Button {
+            actions.beginImportPDF(in: containerFolder)
+        } label: {
+            Label("PDFから作成(\(createTitleSuffix))", systemImage: "doc.badge.plus")
         }
         Divider()
         Button {

@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import UniformTypeIdentifiers
 
 /// サイドバーで選択できる対象
 enum SidebarSelection: Hashable {
@@ -37,14 +38,37 @@ struct RootView: View {
             if phase != .active { session.flushViewports() }
         }
         .onChange(of: selection) { _, newValue in
-            // グラフビューを選んだらキャンバスを畳んでグラフを前面に出す
-            if newValue == .graph { session.showLibrary() }
+            // サイドバーで対象(すべてのノート/グラフ/ゴミ箱/フォルダ)を選んだら、
+            // 確実にキャンバスを畳んで選択したライブラリ画面へ遷移する。
+            if newValue != nil { session.showLibrary() }
         }
         // ノートを開いたらサイドバーを畳み、ライブラリ/グラフへ戻したら再表示する
         .onChange(of: session.isCanvasVisible) { _, visible in
             withAnimation(.easeInOut(duration: 0.2)) {
                 columnVisibility = sidebarVisibility(forCanvas: visible)
             }
+        }
+        // PDF 直接インポート: 選んだ PDF を全ページ背景の通常ノートとして作成し、即開く
+        .fileImporter(
+            isPresented: $actions.isPDFPickerPresented,
+            allowedContentTypes: [.pdf],
+            allowsMultipleSelection: false
+        ) { result in
+            importPDF(from: result)
+        }
+    }
+
+    /// PDF ピッカーの結果を安全に読み込み、通常ノートを作成して開く。
+    private func importPDF(from result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, let url = urls.first else { return }
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { return }
+        let title = url.deletingPathExtension().lastPathComponent
+        if let note = LibraryService.createPagedNoteFromPDF(
+            data: data, titled: title, folder: actions.pdfImportParentFolder, in: context
+        ) {
+            session.open(note)
         }
     }
 

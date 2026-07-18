@@ -70,6 +70,15 @@ final class OpenNotesSession: ObservableObject {
         let isNewTab = !openNotes.contains(note)
         if isNewTab { openNotes.append(note) }
         if isSplitActive {
+            // 重複ガード: どちらかのペインで既に表示中なら、その側へフォーカスを移すだけにして
+            // 同じノートを両ペインで開く(競合・破損の元)ことを防ぐ。
+            if note.objectID == leftNoteID || note.objectID == rightNoteID {
+                activeSide = note.objectID == leftNoteID ? .left : .right
+                selectedNote = note
+                isCanvasVisible = true
+                persistState()
+                return
+            }
             // 既存タブはいまの所属側のまま表示する(ライブラリ/グラフ/サイドバー経由で開いても
             // 側を移動させない)。新規タブだけをアクティブ側へ載せる。これをしないと、すべての
             // ノート経由で開くたびに左のタブがアクティブ側(通常は右)へ吸い寄せられ、右へ集まる。
@@ -87,6 +96,17 @@ final class OpenNotesSession: ObservableObject {
     /// 分割タブバーのタブタップから呼ぶ。分割していないときは通常オープンにフォールバックする。
     func open(_ note: NoteFile, on side: SplitSide) {
         guard isSplitActive else { open(note); return }
+        // 重複ガード: 対向ペインで既に同じノートが開かれている場合は、その側でタブを開かず
+        // 対向ペインへフォーカスを移す(同一ノートを両ペインで開く競合・破損を防ぐ)。
+        let opposite: SplitSide = side == .left ? .right : .left
+        let oppositeID = opposite == .left ? leftNoteID : rightNoteID
+        if oppositeID == note.objectID {
+            activeSide = opposite
+            selectedNote = note
+            isCanvasVisible = true
+            persistState()
+            return
+        }
         if !openNotes.contains(note) { openNotes.append(note) }
         noteSides[note.objectID] = side
         if side == .left { leftNoteID = note.objectID } else { rightNoteID = note.objectID }

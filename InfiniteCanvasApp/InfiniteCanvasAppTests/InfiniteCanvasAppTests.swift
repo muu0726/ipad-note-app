@@ -430,64 +430,6 @@ struct OpenNotesSessionTests {
     }
 }
 
-// MARK: - 蛍光ペンの背面回り込み(前面=不可視 / 背面=復元)
-
-@Suite("蛍光ペンの背面レイヤー分離")
-struct MarkerLayerTests {
-
-    /// 指定インク種別・色の短いストローク
-    private func stroke(_ inkType: PKInk.InkType, color: UIColor) -> PKStroke {
-        let points = (0...5).map { i -> PKStrokePoint in
-            PKStrokePoint(
-                location: CGPoint(x: CGFloat(i) * 4, y: 0),
-                timeOffset: TimeInterval(i) * 0.01,
-                size: CGSize(width: 3, height: 3), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2
-            )
-        }
-        return PKStroke(ink: PKInk(inkType, color: color),
-                        path: PKStrokePath(controlPoints: points, creationDate: Date()))
-    }
-
-    private func alpha(_ color: UIColor) -> CGFloat {
-        var a: CGFloat = 0
-        color.getRed(nil, green: nil, blue: nil, alpha: &a)
-        return a
-    }
-
-    @Test("背面ミラーはマーカーだけを抽出し不透明度を復元する")
-    func backingExtractsMarkersWithRestoredAlpha() {
-        let pen = stroke(.pen, color: .black)
-        let marker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(0))  // 前面では不可視
-        let full = PKDrawing(strokes: [pen, marker])
-
-        let backing = MarkerLayer.backingDrawing(from: full)
-
-        #expect(backing.strokes.count == 1)  // ペンは含めない
-        #expect(backing.strokes.first?.ink.inkType == .marker)
-        // 不透明度は markerAlpha に復元される
-        let restored = alpha(backing.strokes.first!.ink.color)
-        #expect(abs(restored - PenToolState.markerAlpha) < 0.001)
-    }
-
-    @Test("hidden はマーカーを alpha 0 にしつつ種別を保つ")
-    func hiddenZeroesAlphaKeepsType() {
-        let marker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(PenToolState.markerAlpha))
-        let hidden = MarkerLayer.hidden(marker)
-        #expect(hidden.ink.inkType == .marker)
-        #expect(alpha(hidden.ink.color) < 0.001)
-    }
-
-    @Test("isVisibleMarker は描き立てのマーカーだけ true")
-    func isVisibleMarkerDetection() {
-        let freshMarker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(PenToolState.markerAlpha))
-        let hiddenMarker = stroke(.marker, color: UIColor.systemYellow.withAlphaComponent(0))
-        let pen = stroke(.pen, color: .black)
-        #expect(MarkerLayer.isVisibleMarker(freshMarker))
-        #expect(!MarkerLayer.isVisibleMarker(hiddenMarker))  // 既に背面化済み
-        #expect(!MarkerLayer.isVisibleMarker(pen))           // ペンは対象外
-    }
-}
-
 // MARK: - ページ並び替え・複製・削除の座標再割り当て
 
 @Suite("ページ編集プラン")
@@ -565,13 +507,16 @@ struct PagePlanTests {
         #expect(PagePlanner.currentPage(contentOffsetX: 1650, viewWidth: 800, zoomScale: 1, layout: l) == 2)
     }
 
-    @Test("ページ先頭へのスクロール offset を計算する")
+    @Test("ページ表示のスクロール offset(収まるなら中央寄せ・超えるなら左マージン)")
     func scrollOffsetForPage() {
         let l = layout(3)
-        // ページ1(minX=820)先頭へ、余白24 → 820 - 24 = 796
-        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 1, layout: l, margin: 24) == 796)
-        // ズーム2倍なら (820*2) - 24 = 1616
-        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 2, layout: l, margin: 24) == 1616)
+        // 用紙幅(800)< 画面幅(1200) → 中央寄せ: minX*zoom - (viewWidth - pageWidth)/2
+        // page1 minX=820, zoom=1 → 820 - (1200-800)/2 = 820 - 200 = 620
+        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 1, layout: l, margin: 24, viewWidth: 1200) == 620)
+        // ズーム2倍で用紙幅(1600)> 画面幅(1200) → 左マージンスナップ: 820*2 - 24 = 1616
+        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 2, layout: l, margin: 24, viewWidth: 1200) == 1616)
+        // 境界: 用紙幅 == 画面幅(800)は「収まる」扱い(中央寄せ・余白0) → 820
+        #expect(PagePlanner.scrollOffsetX(toPage: 1, zoomScale: 1, layout: l, margin: 24, viewWidth: 800) == 820)
     }
 }
 

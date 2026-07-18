@@ -21,6 +21,18 @@ final class LibraryActionCoordinator: ObservableObject {
     /// 作成・名前変更ダイアログのテキストフィールド用
     @Published var nameText = ""
 
+    // MARK: - PDF 直接インポート
+    /// PDF ファイルピッカーの表示フラグ
+    @Published var isPDFPickerPresented = false
+    /// PDF から作成する新規ノートの親フォルダ(ピッカー確定時に使用)
+    @Published var pdfImportParentFolder: Folder?
+
+    /// PDF インポートを開始する(親フォルダを保持してファイルピッカーを開く)。
+    func beginImportPDF(in parent: Folder?) {
+        pdfImportParentFolder = parent
+        isPDFPickerPresented = true
+    }
+
     func beginCreateFolder(in parent: Folder?) {
         nameText = ""
         createRequest = CreateRequest(kind: .folder, parent: parent)

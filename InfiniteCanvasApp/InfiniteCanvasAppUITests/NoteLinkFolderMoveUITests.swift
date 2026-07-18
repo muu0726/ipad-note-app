@@ -12,6 +12,7 @@ final class NoteLinkFolderMoveUITests: XCTestCase {
     func testNoteLinkSurvivesTargetFolderMove() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         let targetName = "TGT\(Int.random(in: 10000...99999))"
@@ -33,7 +34,7 @@ final class NoteLinkFolderMoveUITests: XCTestCase {
                       "リンクカードにタイトルが出ない")
 
         // ライブラリへ戻る
-        app.buttons["書類"].tap()
+        app.buttons["canvas-to-library"].tap()
 
         // フォルダを新規作成
         let addMenu = app.buttons["library-add-menu"]
@@ -67,7 +68,7 @@ final class NoteLinkFolderMoveUITests: XCTestCase {
         let sourceTile = app.buttons["grid-note-\(sourceName)"]
         XCTAssertTrue(sourceTile.waitForExistence(timeout: 5), "リンク元ノートのタイルが無い")
         sourceTile.tap()
-        XCTAssertTrue(app.navigationBars[sourceName].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "note-tab-\(sourceName)").firstMatch.waitForExistence(timeout: 5),
                       "リンク元ノートが開かない")
 
         // カードは「(削除されたノート)」にならず、リンク先タイトルを保っているはず
@@ -80,7 +81,7 @@ final class NoteLinkFolderMoveUITests: XCTestCase {
 
         // ダブルタップでリンク先へジャンプできる
         card.doubleTap()
-        XCTAssertTrue(app.navigationBars[targetName].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "note-tab-\(targetName)").firstMatch.waitForExistence(timeout: 5),
                       "フォルダ移動後にリンク先へジャンプできない")
         attachScreenshot(app, name: "2-jumped-after-move")
     }
@@ -89,8 +90,8 @@ final class NoteLinkFolderMoveUITests: XCTestCase {
 
     @MainActor
     private func createNote(_ app: XCUIApplication, named name: String?) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }

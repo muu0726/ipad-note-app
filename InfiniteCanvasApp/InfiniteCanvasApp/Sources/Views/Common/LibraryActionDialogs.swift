@@ -20,10 +20,9 @@ struct LibraryActionDialogs: ViewModifier {
                 Button("作成") { performCreateFolder() }
                 Button("キャンセル", role: .cancel) {}
             }
-            // ノートは名前に加えて用紙の色(白 / 黒)を選ぶためシートで作成する
+            // ノートは名前に加えて用紙の色(白 / 黒)・背景を選ぶためシートで作成する(中央表示)
             .sheet(item: noteCreateRequest) { request in
                 NoteCreateSheet(parent: request.parent)
-                    .presentationDetents([.medium])
             }
             .alert("名前を変更", isPresented: isRenamePresented) {
                 TextField("名前", text: $coordinator.nameText)
@@ -111,7 +110,7 @@ struct LibraryActionDialogs: ViewModifier {
 
 /// 新規ノート作成シート。名前と用紙の色(白 / 黒)を選ぶ(自由ノート風)。
 /// 白は黒い罫線・ドット、黒は白い罫線・ドットになる。
-private struct NoteCreateSheet: View {
+struct NoteCreateSheet: View {
     let parent: Folder?
     @Environment(\.managedObjectContext) private var context
     @Environment(\.dismiss) private var dismiss
@@ -119,6 +118,8 @@ private struct NoteCreateSheet: View {
     @State private var name = ""
     @State private var pageColor: CanvasPageColor = .white
     @State private var noteType: CanvasNoteType = .infinite
+    /// 通常ノートの背景デザイン(無限キャンバスでは既定 .dots を使うため非表示)
+    @State private var backgroundStyle: CanvasBackgroundStyle = .grid
 
     var body: some View {
         NavigationStack {
@@ -133,6 +134,19 @@ private struct NoteCreateSheet: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                }
+                // 通常ノートのみ背景デザインを選ぶ(無限キャンバスは既定でドット)
+                if noteType == .paged {
+                    Section("背景デザイン") {
+                        Picker("背景デザイン", selection: $backgroundStyle) {
+                            ForEach(CanvasBackgroundStyle.allCases, id: \.self) { style in
+                                Text(style.label)
+                                    .tag(style)
+                                    .accessibilityIdentifier("bg-style-\(style.rawValue)")
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
                 }
                 Section("用紙の色") {
                     HStack(spacing: 20) {
@@ -158,6 +172,7 @@ private struct NoteCreateSheet: View {
                             folder: parent,
                             pageColor: pageColor,
                             noteType: noteType,
+                            backgroundStyle: noteType == .paged ? backgroundStyle : .dots,
                             in: context
                         )
                         session.open(note)

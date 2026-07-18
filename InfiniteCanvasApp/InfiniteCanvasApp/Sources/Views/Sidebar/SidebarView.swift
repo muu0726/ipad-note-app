@@ -76,6 +76,12 @@ struct SidebarView: View {
                         Label("ノート", systemImage: "square.and.pencil")
                     }
                     .accessibilityIdentifier("sidebar-create-note")
+                    Button {
+                        actions.beginImportPDF(in: currentFolder)
+                    } label: {
+                        Label("PDF", systemImage: "doc.badge.plus")
+                    }
+                    .accessibilityIdentifier("sidebar-import-pdf")
                     Spacer()
                 }
             }

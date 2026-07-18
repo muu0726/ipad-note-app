@@ -13,12 +13,13 @@ final class DragDropUITests: XCTestCase {
     func testDragNoteIntoFolderAndBack() throws {
         XCUIDevice.shared.orientation = .landscapeLeft  // サイドバーを常時表示にする
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         // タブ復元でキャンバスが開いていたらライブラリへ戻る
-        let backToLibrary = app.buttons["書類"]
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
         if backToLibrary.waitForExistence(timeout: 3) {
-            backToLibrary.tap()
+            app.buttons["canvas-to-library"].tap()
         }
 
         // ルートグリッドのノートとフォルダを1つずつ取得
@@ -73,11 +74,12 @@ final class DragDropUITests: XCTestCase {
     func testQuickReleaseDrop() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
-        let backToLibrary = app.buttons["書類"]
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
         if backToLibrary.waitForExistence(timeout: 3) {
-            backToLibrary.tap()
+            app.buttons["canvas-to-library"].tap()
         }
 
         let anyNote = app.descendants(matching: .any)
@@ -111,11 +113,12 @@ final class DragDropUITests: XCTestCase {
     func testDragNoteOntoSidebarFolderInPortrait() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
-        let backToLibrary = app.buttons["書類"]
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
         if backToLibrary.waitForExistence(timeout: 3) {
-            backToLibrary.tap()
+            app.buttons["canvas-to-library"].tap()
         }
 
         let anyNote = app.descendants(matching: .any)

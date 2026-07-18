@@ -113,9 +113,21 @@ enum PagePlanner {
         return best
     }
 
-    /// ページ index の先頭へスクロールするための contentOffset.x(横スクロール)。
+    /// ページ index を表示するための contentOffset.x(横スクロール)。
+    /// - 用紙幅(ズーム後)が画面幅 `viewWidth` 以下: 用紙を画面中央へ寄せる
+    ///   (画面が用紙より広いとき、左端スナップだと右に隣ページ/余白が露出するため)。
+    /// - 用紙幅が画面幅を超える(ズームイン時): 従来通り左端をマージン分だけ寄せる。
     /// margin はスクロール方向端のグレー余白(`PageMetrics.margin`)。
-    static func scrollOffsetX(toPage index: Int, zoomScale: CGFloat, layout: PagedLayoutCalculator, margin: CGFloat) -> CGFloat {
-        layout.pageRect(index).minX * zoomScale - margin
+    static func scrollOffsetX(
+        toPage index: Int, zoomScale: CGFloat,
+        layout: PagedLayoutCalculator, margin: CGFloat, viewWidth: CGFloat
+    ) -> CGFloat {
+        let pageRect = layout.pageRect(index)
+        let pageWidth = pageRect.width * zoomScale
+        if pageWidth <= viewWidth {
+            return pageRect.minX * zoomScale - (viewWidth - pageWidth) / 2
+        } else {
+            return pageRect.minX * zoomScale - margin
+        }
     }
 }

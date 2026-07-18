@@ -13,11 +13,12 @@ final class PencilOnlyUITests: XCTestCase {
     func testFingerDoesNotDraw() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         // 空の新規ノートを作成して開く(Undo は無効な状態から始まる)
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }

@@ -46,8 +46,9 @@ final class ObjectInteractionUITests: XCTestCase {
     private func launchAndOpenNote() -> XCUIApplication {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
-        let backToLibrary = app.buttons["書類"]
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
         if !backToLibrary.waitForExistence(timeout: 3) {
             let anyNote = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier BEGINSWITH 'grid-note-'")).firstMatch
@@ -65,8 +66,15 @@ final class ObjectInteractionUITests: XCTestCase {
     @MainActor
     private func insertText(_ app: XCUIApplication) -> XCUIElement {
         let text = "\(Int.random(in: 10_000_000...99_999_999))"
-        app.buttons["toolbar-insert-menu"].tap()
-        app.buttons["テキスト"].tap()
+        app.buttons["toolbar-tool-text"].tap()
+        // テキストは配置ツール: キャンバス中央をタップして配置する
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // 配置直後は選択・編集状態(実機ではキーボードも表示)。シミュレータでは
+        // プログラム的フォーカスにソフトキーボードが追従しないため、配置したテキストを
+        // 一度タップして編集(キーボード)を確実に開始する。
+        let placed = app.textViews.firstMatch
+        XCTAssertTrue(placed.waitForExistence(timeout: 5), "テキストが配置されない")
+        placed.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "編集が始まらない")
         app.typeText(text)
         // 編集終了(キーボードに隠れない右上をタップ)

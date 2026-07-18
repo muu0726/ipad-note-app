@@ -119,3 +119,31 @@ struct AddNoteTile: View {
         .accessibilityIdentifier("add-note-tile")
     }
 }
+
+/// PDF を選んで通常ノート(全ページ背景展開)を作る破線タイル。AddNoteTile と並べて置く。
+struct AddPDFTile: View {
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6]))
+                        .foregroundStyle(.tertiary)
+                        .aspectRatio(4 / 3, contentMode: .fit)
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                }
+                Text("PDF から作成")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text("")
+                    .font(.caption2)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("add-pdf-tile")
+    }
+}

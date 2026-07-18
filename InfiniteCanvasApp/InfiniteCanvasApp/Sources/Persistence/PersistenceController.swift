@@ -33,6 +33,14 @@ struct PersistenceController {
 
     let container: NSPersistentContainer
 
+    /// UIテスト等でクリーンな状態から始めたいときの起動フラグ。
+    /// `launchEnvironment["RESET_STORE"] = "1"` もしくは `launchArguments` に `-ResetStore` を渡すと有効。
+    /// 製品ビルドでは常に無効(フラグを渡す手段がない)。
+    static var shouldResetStore: Bool {
+        let info = ProcessInfo.processInfo
+        return info.environment["RESET_STORE"] == "1" || info.arguments.contains("-ResetStore")
+    }
+
     init(inMemory: Bool = false) {
         container = NSPersistentContainer(name: "InfiniteCanvas", managedObjectModel: Self.managedObjectModel)
 
@@ -41,6 +49,11 @@ struct PersistenceController {
         }
         if inMemory {
             description.url = URL(fileURLWithPath: "/dev/null")
+        } else if Self.shouldResetStore {
+            // UIテスト用: 起動時に既存ストアを破棄してノートの蓄積をクリアする。
+            // これを入れないと同一シミュレータでテストを繰り返すたびにライブラリへノートが
+            // 溜まり、グリッド末尾の `add-note-tile` が画面外へ押し出されて作成系が落ちる。
+            Self.destroyStore(at: description.url, model: Self.managedObjectModel)
         }
         // 将来の CloudKit 切り替えに備えて履歴トラッキングを最初から有効化しておく
         // (途中から有効化するとストア移行が必要になるため。ローカル運用でも無害)
@@ -54,6 +67,16 @@ struct PersistenceController {
         }
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    }
+
+    /// 指定 URL の SQLite ストア(と付随する -wal / -shm)を破棄する。UIテストの初期化用。
+    private static func destroyStore(at url: URL?, model: NSManagedObjectModel) {
+        guard let url else { return }
+        let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+        try? coordinator.destroyPersistentStore(at: url, ofType: NSSQLiteStoreType, options: nil)
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + suffix))
+        }
     }
 
     // MARK: - プレビュー用(メモリ内ストア + サンプルデータ)

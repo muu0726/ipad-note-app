@@ -12,6 +12,7 @@ final class NoteLinkOpenButtonUITests: XCTestCase {
     func testOpenButtonJumpsInPenMode() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         let targetName = "TGT\(Int.random(in: 10000...99999))"
@@ -37,7 +38,7 @@ final class NoteLinkOpenButtonUITests: XCTestCase {
         XCTAssertTrue(openButton.waitForExistence(timeout: 5), "リンクカードに「開く」ボタンが無い")
         attachScreenshot(app, name: "1-open-button-in-pen-mode")
         openButton.tap()
-        XCTAssertTrue(app.navigationBars[targetName].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "note-tab-\(targetName)").firstMatch.waitForExistence(timeout: 5),
                       "ペンモードで「開く」ボタンからリンク先へジャンプできない")
         attachScreenshot(app, name: "2-jumped-via-open-button")
     }
@@ -46,8 +47,8 @@ final class NoteLinkOpenButtonUITests: XCTestCase {
 
     @MainActor
     private func createNote(_ app: XCUIApplication, named name: String?) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }

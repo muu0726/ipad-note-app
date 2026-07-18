@@ -13,14 +13,15 @@ final class SidebarCreateInFolderUITests: XCTestCase {
     func testCreateNoteInsideFolderFromSidebar() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         let folderName = "FLD\(Int.random(in: 10000...99999))"
         let noteName = "NOTE\(Int.random(in: 10000...99999))"
 
         // 前回のノートが復元されてキャンバス表示のことがあるため、ライブラリへ戻す
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
 
         // フォルダをルートに作成(グリッドの追加メニュー)
         let addMenu = app.buttons["library-add-menu"]
@@ -50,7 +51,7 @@ final class SidebarCreateInFolderUITests: XCTestCase {
         nameField.tap()
         nameField.typeText(noteName)
         app.buttons["dialog-create-button"].tap()
-        XCTAssertTrue(app.navigationBars[noteName].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "note-tab-\(noteName)").firstMatch.waitForExistence(timeout: 5),
                       "作成したノートが開かない")
 
         // 作業中なので、サイドバーの作成先表示がそのフォルダになっている
@@ -62,7 +63,7 @@ final class SidebarCreateInFolderUITests: XCTestCase {
         attachScreenshot(app, name: "1-created-in-folder-and-open")
 
         // ノートを閉じてライブラリへ。ルートには無く、フォルダ内にあることを確認
-        app.buttons["書類"].tap()
+        app.buttons["canvas-to-library"].tap()
         XCTAssertFalse(app.buttons["grid-note-\(noteName)"].waitForExistence(timeout: 2),
                        "フォルダ内に作ったはずのノートがルートにある")
         app.buttons["grid-folder-\(folderName)"].tap()

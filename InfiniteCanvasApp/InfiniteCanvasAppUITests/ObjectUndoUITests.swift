@@ -15,6 +15,7 @@ final class ObjectUndoUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         try openAnyNote(app)
@@ -26,10 +27,16 @@ final class ObjectUndoUITests: XCTestCase {
         // ① テキストオブジェクトを挿入(挿入直後に編集が始まる)
         // 日本語IMEの変換(未確定文字)を避けるため数字のみのマーカーを使う
         let marker = "\(Int.random(in: 10_000_000...99_999_999))"
-        app.buttons["toolbar-insert-menu"].tap()
-        let insertText = app.buttons["テキスト"]
-        XCTAssertTrue(insertText.waitForExistence(timeout: 3), "挿入メニューが開かない")
+        let insertText = app.buttons["toolbar-tool-text"]
+        XCTAssertTrue(insertText.waitForExistence(timeout: 3), "テキストツールが無い")
         insertText.tap()
+        // テキストは配置ツール: キャンバス中央をタップして配置する
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // 配置直後は選択・編集状態。シミュレータではプログラム的フォーカスに
+        // ソフトキーボードが追従しないため、配置したテキストを一度タップして編集を開始する。
+        let placedText = app.textViews.firstMatch
+        XCTAssertTrue(placedText.waitForExistence(timeout: 5), "テキストが配置されない")
+        placedText.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "テキスト編集が自動開始されない")
         app.typeText(marker)
@@ -114,6 +121,7 @@ final class ObjectUndoUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         try openAnyNote(app)
@@ -123,10 +131,16 @@ final class ObjectUndoUITests: XCTestCase {
 
         // ① テキストオブジェクトを挿入して確定
         let marker = "\(Int.random(in: 10_000_000...99_999_999))"
-        app.buttons["toolbar-insert-menu"].tap()
-        let insertText = app.buttons["テキスト"]
-        XCTAssertTrue(insertText.waitForExistence(timeout: 3), "挿入メニューが開かない")
+        let insertText = app.buttons["toolbar-tool-text"]
+        XCTAssertTrue(insertText.waitForExistence(timeout: 3), "テキストツールが無い")
         insertText.tap()
+        // テキストは配置ツール: キャンバス中央をタップして配置する
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // 配置直後は選択・編集状態。シミュレータではプログラム的フォーカスに
+        // ソフトキーボードが追従しないため、配置したテキストを一度タップして編集を開始する。
+        let placedText = app.textViews.firstMatch
+        XCTAssertTrue(placedText.waitForExistence(timeout: 5), "テキストが配置されない")
+        placedText.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
                       "テキスト編集が自動開始されない")
         app.typeText(marker)
@@ -185,8 +199,10 @@ final class ObjectUndoUITests: XCTestCase {
     /// ノートが1つもなければ新規作成する(作成後そのままタブで開かれる)。
     @MainActor
     private func openAnyNote(_ app: XCUIApplication) throws {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) {
+        // キャンバスが開いているかは、ツールバー(ペンツール)の有無で判定する
+        // (旧「書類」戻るボタンはツールバー刷新で廃止された)。
+        let inCanvas = app.buttons["toolbar-tool-pen"]
+        if inCanvas.waitForExistence(timeout: 3) {
             return  // すでにキャンバスが開いている
         }
         let anyNote = app.descendants(matching: .any)
@@ -203,7 +219,7 @@ final class ObjectUndoUITests: XCTestCase {
             XCTAssertTrue(confirmCreate.waitForExistence(timeout: 5), "作成シートが開かない")
             confirmCreate.tap()
         }
-        XCTAssertTrue(backToLibrary.waitForExistence(timeout: 5), "ノートが開かない")
+        XCTAssertTrue(inCanvas.waitForExistence(timeout: 5), "ノートが開かない")
     }
 
     /// 条件が真になるまでポーリングして expectation を満たす

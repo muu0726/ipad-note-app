@@ -16,6 +16,7 @@ final class ShapeAssistUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         try openAnyNote(app)
 
@@ -59,6 +60,7 @@ final class ShapeAssistUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         try openAnyNote(app)
 
@@ -110,7 +112,7 @@ final class ShapeAssistUITests: XCTestCase {
     /// キャンバスが開いていればそのまま、なければノートを開く/新規作成する
     @MainActor
     private func openAnyNote(_ app: XCUIApplication) throws {
-        let backToLibrary = app.buttons["書類"]
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
         if backToLibrary.waitForExistence(timeout: 3) { return }
 
         let anyNote = app.descendants(matching: .any)

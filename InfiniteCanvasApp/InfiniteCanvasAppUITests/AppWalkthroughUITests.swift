@@ -15,6 +15,7 @@ final class AppWalkthroughUITests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         shot(app, "01-launch-library")
@@ -40,8 +41,12 @@ final class AppWalkthroughUITests: XCTestCase {
         insert(app, item: "toolbar-insert-todo", menuLabel: "Todoリスト")
         shot(app, "05-insert-todo")
 
-        // テキストを挿入して数字入力(日本語IME回避で数字のみ)
-        insert(app, item: nil, menuLabel: "テキスト")
+        // テキストは配置ツール: 選択してキャンバス中央をタップして配置(日本語IME回避で数字のみ)
+        tapIfExists(app.buttons["toolbar-tool-text"])
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // 配置したテキストを一度タップして編集(キーボード)を開始する
+        let placedText = app.textViews.firstMatch
+        if placedText.waitForExistence(timeout: 3) { placedText.tap() }
         if app.keyboards.firstMatch.waitForExistence(timeout: 3) {
             app.typeText("12345")
         }
@@ -53,10 +58,12 @@ final class AppWalkthroughUITests: XCTestCase {
         for _ in 0..<3 { tapIfExists(app.buttons["toolbar-undo"]) }
         shot(app, "07-after-undo")
 
-        // 背景テンプレ切替(方眼)
-        tapIfExists(app.buttons["背景"])
-        tapIfExists(app.buttons["方眼"])
-        shot(app, "08-grid-background")
+        // ツール設定ポップオーバー(太さ + 色): ペン選択 → 再タップで表示(ツールバー刷新)
+        tapIfExists(app.buttons["toolbar-tool-pen"])   // 選択
+        tapIfExists(app.buttons["toolbar-tool-pen"])   // 再タップで設定ポップオーバー
+        shot(app, "08-tool-settings-popover")
+        // ポップオーバーを閉じる(キャンバス上をタップ)
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
 
         // 2枚目を作成 → 右側で開いて分割
         createNote(app, named: n2)
@@ -71,13 +78,13 @@ final class AppWalkthroughUITests: XCTestCase {
         shot(app, "11-split-drew-both")
 
         // 「書類」でライブラリへ戻り、2枚目を開き直す(分割維持の確認)
-        tapIfExists(app.buttons["書類"])
+        tapIfExists(app.buttons["canvas-to-library"])
         shot(app, "12-library-with-open-notes")
         tapIfExists(element(app, id: "grid-note-\(n2)"))
         shot(app, "13-reopened-still-split")
 
         // グラフビューを開く(「書類」でライブラリへ戻るとサイドバーが再表示される)
-        tapIfExists(app.buttons["書類"])
+        tapIfExists(app.buttons["canvas-to-library"])
         tapIfExists(app.staticTexts["グラフビュー"])
         tapIfExists(app.buttons["グラフビュー"])
         // グラフの中央フィット(約500ms後+トランジション)を待ってから撮影
@@ -123,8 +130,8 @@ final class AppWalkthroughUITests: XCTestCase {
     }
 
     @MainActor private func createNote(_ app: XCUIApplication, named name: String) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { tapIfExists(app.buttons["新規ノート"].firstMatch) }

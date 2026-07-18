@@ -14,11 +14,12 @@ final class PagedDrawingBoundsUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil を模倣できないため、指描画を許可して描画可否を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         // 通常ノートを作成して開く
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }
@@ -32,6 +33,10 @@ final class PagedDrawingBoundsUITests: XCTestCase {
 
         let undo = app.buttons["toolbar-undo"]
         XCTAssertTrue(undo.waitForExistence(timeout: 5), "ツールバーが出ない")
+        // 既定でペンが選択済みのため、いきなり toolbar-tool-pen を叩くと「再タップ=設定ポップオーバー」
+        // が開いて描画を妨げる。一旦別ツールにしてからペンを選び直し、ポップオーバーを出さずに
+        // 描画モードにする。
+        app.buttons["toolbar-tool-eraser"].tap()
         app.buttons["toolbar-tool-pen"].tap()
         // ウィンドウは左のサイドバー + 右のキャンバスから成る。座標はウィンドウ基準なので、
         // キャンバス(右側)の中の用紙(左寄り)とグレー余白(右寄り)を狙う。

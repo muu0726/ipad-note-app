@@ -97,6 +97,9 @@ struct LibraryGridView: View {
                 AddNoteTile {
                     actions.beginCreateNote(in: folder)
                 }
+                AddPDFTile {
+                    actions.beginImportPDF(in: folder)
+                }
             }
             .padding(24)
         }

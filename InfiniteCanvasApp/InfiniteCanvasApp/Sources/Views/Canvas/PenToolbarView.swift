@@ -2,8 +2,9 @@ import SwiftUI
 import PencilKit
 
 /// 自由ノート風のアプリ固定カスタムツールバー(PKToolPicker 不使用)。
-/// 左: 戻る / やり直し → ツール切替(選択 / ペン / マーカー / 消しゴム)/ 中央: 太さ3スロット /
-/// 右: カラーパレット + カスタム色 + オブジェクト挿入メニュー + 折りたたみ。
+/// 並び: `[戻る][進む] | [投げ縄][ペン●][マーカー●][消しゴム][テキスト] | [図形アシスト] | [＋]`
+/// 太さ・色は常時表示せず、選択中ツールを **再タップ** したときにそのツール直上へ
+/// 「太さスライダー + カラーパレット」の設定ポップオーバーを出す。
 struct PenToolbarView: View {
     @ObservedObject var toolState: PenToolState
     @ObservedObject var undoBridge: CanvasUndoBridge
@@ -13,41 +14,34 @@ struct PenToolbarView: View {
     var onInsertPDF: () -> Void = {}
     var onInsertNoteLink: () -> Void = {}
     var onInsertTodo: () -> Void = {}
+    /// ライブラリ一覧へ戻る(タブ・分割は維持したまま)。
+    var onOpenLibrary: () -> Void = {}
     /// 選択中テキストのフォントサイズ変更(新しい絶対サイズを渡す)
     var onFontSizeChange: (CGFloat) -> Void = { _ in }
     @State private var customColor: Color = .black
-    @State private var isWidthPopoverPresented = false
+    /// 設定ポップオーバーを開いているツール(再タップで開く)。nil で閉じる。
+    @State private var settingsPopoverTool: CanvasTool?
 
     var body: some View {
         HStack(spacing: 0) {
             if !isCollapsed {
-                // 狭い端末(iPad mini など)でも全コントロールへ到達できるよう横スクロールでラップ。
-                // 溢れても右端の項目(色・挿入)がクリップされて操作不能になることを防ぐ。
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
-                        undoRedoButtons
-                        barDivider
-                        toolButtons
-                        barDivider
-                        shapeAssistButton
-                        // テキスト選択中はフォントサイズ変更UIを差し込む
-                        if toolState.isSelectMode, toolState.selectedTextObject != nil {
-                            barDivider
-                            fontSizeControl
-                        }
-                        barDivider
-                        widthControl
-                        barDivider
-                        colorPalette
-                        barDivider
-                        insertMenu
-                    }
+                libraryButton
+                barDivider
+                undoRedoButtons
+                barDivider
+                toolButtons
+                barDivider
+                shapeAssistButton
+                // テキスト選択中はフォントサイズ変更UIを差し込む
+                if toolState.isSelectMode, toolState.selectedTextObject != nil {
+                    barDivider
+                    fontSizeControl
                 }
-                .frame(height: 34)   // コントロール群の高さに固定(縦へ広がらないように)
-            } else {
-                Spacer(minLength: 8)
+                barDivider
+                insertMenu
             }
-            // 折りたたみボタンは常に右端に固定(スクロールで流れて消えないように分離)
+            Spacer(minLength: 8)
+            // 折りたたみボタンは常に右端
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) { isCollapsed.toggle() }
             } label: {
@@ -62,9 +56,6 @@ struct PenToolbarView: View {
         .padding(.vertical, isCollapsed ? 0 : 6)
         .background(.bar)
         // ツール切替のたびにカスタムカラーピッカーの表示を今のツールの色へ同期する。
-        // (customColor はローカル @State のため、切替なしだと前のツールで選んだ色が
-        //  表示に残り、選び直しても toolState.currentColor と一致して onChange が
-        //  発火せず反映されないことがあった)
         .onChange(of: toolState.tool) { _, _ in
             customColor = Color(uiColor: toolState.currentColor)
         }
@@ -72,6 +63,23 @@ struct PenToolbarView: View {
 
     private var barDivider: some View {
         Divider().frame(height: 24).padding(.horizontal, 10)
+    }
+
+    // MARK: - ライブラリへ戻る(タブ・分割は維持)
+
+    /// 一覧へ戻る導線。分割中もサイドバートグルが出ず一覧へ戻れなくなるため、
+    /// キャンバス左端に常設する(session.showLibrary は openNotes/分割状態を保持する)。
+    private var libraryButton: some View {
+        Button {
+            onOpenLibrary()
+        } label: {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 16))
+                .frame(width: 36, height: 34)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("canvas-to-library")
     }
 
     // MARK: - 戻る / やり直し
@@ -106,7 +114,7 @@ struct PenToolbarView: View {
         }
     }
 
-    // MARK: - ツール切替
+    // MARK: - ツール切替(投げ縄 / ペン / マーカー / 消しゴム / テキスト)
 
     private var toolButtons: some View {
         HStack(spacing: 4) {
@@ -114,27 +122,145 @@ struct PenToolbarView: View {
             toolButton(.pen, icon: "pencil.tip")
             toolButton(.marker, icon: "highlighter")
             toolButton(.eraser, icon: "eraser")
+            // テキストはタップ位置配置ツール(手書きは遮断)。アイコンは四角囲みT。
+            toolButton(.text, icon: "t.square")
         }
     }
 
+    /// ツールボタン。未選択→切替のみ / 選択中に再タップ→設定ポップオーバー(ペン・マーカー・消しゴム)。
     private func toolButton(_ tool: CanvasTool, icon: String) -> some View {
         Button {
-            toolState.tool = tool
-            // 描画/消しゴム/投げ縄を選んだら、直前のオブジェクト選択は解除して描画に戻す。
-            // (選択解除はオブジェクトレイヤーへ伝播し、描画ジェスチャが再び有効になる)
-            toolState.isSelectMode = false
+            if toolState.tool == tool, !toolState.isSelectMode {
+                // 描画モードで同じツールを再タップ → 設定ポップオーバー
+                if hasSettings(tool) { settingsPopoverTool = tool }
+            } else {
+                // 別ツールへの切替、または選択/編集モードからの復帰。
+                // どちらの場合もオブジェクト選択/テキスト編集は解除して描画へ戻す。
+                toolState.tool = tool
+                toolState.isSelectMode = false
+            }
         } label: {
-            Image(systemName: icon)
-                .font(.system(size: 18))
-                .frame(width: 40, height: 34)
-                .background(
-                    toolState.tool == tool ? Color.accentColor.opacity(0.18) : .clear,
-                    in: RoundedRectangle(cornerRadius: 8)
-                )
-                .contentShape(Rectangle())
+            toolIcon(tool, icon: icon)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("toolbar-tool-\(tool.rawValue)")
+        .popover(isPresented: popoverBinding(for: tool), arrowEdge: .top) {
+            toolSettingsPopover(for: tool)
+        }
+    }
+
+    private func toolIcon(_ tool: CanvasTool, icon: String) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 18))
+            .frame(width: 40, height: 34)
+            .background(
+                toolState.tool == tool ? Color.accentColor.opacity(0.18) : .clear,
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            // ペン・マーカーは現在のインク色を小さなドットで示す
+            .overlay(alignment: .bottom) {
+                if tool == .pen || tool == .marker {
+                    Circle()
+                        .fill(Color(uiColor: inkColor(for: tool)))
+                        .frame(width: 8, height: 8)
+                        .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1))
+                        .padding(.bottom, 1)
+                }
+            }
+            .contentShape(Rectangle())
+    }
+
+    private func inkColor(for tool: CanvasTool) -> UIColor {
+        tool == .marker ? toolState.markerColor : toolState.penColor
+    }
+
+    /// 設定ポップオーバーを持つツール(太さ or 色を調整できる)
+    private func hasSettings(_ tool: CanvasTool) -> Bool {
+        tool == .pen || tool == .marker || tool == .eraser
+    }
+
+    private func popoverBinding(for tool: CanvasTool) -> Binding<Bool> {
+        Binding(
+            get: { settingsPopoverTool == tool },
+            set: { if !$0 { settingsPopoverTool = nil } }
+        )
+    }
+
+    // MARK: - ツール設定ポップオーバー(太さ + 色)
+
+    @ViewBuilder
+    private func toolSettingsPopover(for tool: CanvasTool) -> some View {
+        VStack(spacing: 16) {
+            // 太さ
+            VStack(spacing: 10) {
+                Text("太さ: \(widthText)")
+                    .font(.headline.monospacedDigit())
+                Slider(
+                    value: Binding(
+                        get: { toolState.currentWidth },
+                        set: { toolState.currentWidth = ($0 * 2).rounded() / 2 }  // 0.5pt 刻み
+                    ),
+                    in: toolState.widthRange
+                )
+                Capsule()
+                    .fill(Color.primary)
+                    .frame(width: 220, height: min(toolState.currentWidth, 40))
+                    .animation(.easeOut(duration: 0.1), value: toolState.currentWidth)
+            }
+            // 色(ペン・マーカーのみ)
+            if tool == .pen || tool == .marker {
+                Divider()
+                colorPaletteRow
+            }
+        }
+        .padding(20)
+        .frame(width: 300)
+        .presentationCompactAdaptation(.popover)
+    }
+
+    private var widthText: String {
+        String(format: "%.1f pt", toolState.currentWidth)
+    }
+
+    // MARK: - カラーパレット(ポップオーバー内。6色 + カスタム)
+
+    private var colorPaletteRow: some View {
+        HStack(spacing: 10) {
+            ForEach(Array(toolState.palette.enumerated()), id: \.offset) { _, color in
+                Button {
+                    toolState.setColor(color)
+                    customColor = Color(uiColor: color)
+                } label: {
+                    Circle()
+                        .fill(Color(uiColor: color))
+                        .frame(width: 26, height: 26)
+                        .overlay(
+                            Circle().strokeBorder(
+                                isCurrent(color) ? Color.accentColor : Color(.separator),
+                                lineWidth: isCurrent(color) ? 2.5 : 0.5
+                            )
+                        )
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("toolbar-color-\(colorIdentifier(color))")
+            }
+            // カスタム色(HSB ピッカー)
+            ColorPicker("カスタム色", selection: $customColor, supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 30)
+                .onChange(of: customColor) { _, newValue in
+                    toolState.setColor(UIColor(newValue))
+                }
+        }
+    }
+
+    private func isCurrent(_ color: UIColor) -> Bool {
+        toolState.currentColor == color
+    }
+
+    private func colorIdentifier(_ color: UIColor) -> String {
+        (toolState.palette.firstIndex(of: color)).map(String.init) ?? "x"
     }
 
     // MARK: - フォントサイズ(テキスト選択中のみ表示)
@@ -176,9 +302,8 @@ struct PenToolbarView: View {
         onFontSizeChange(next)
     }
 
-    // MARK: - 図形認識アシスト(要件: ON/OFF トグル)
+    // MARK: - 図形認識アシスト(ON/OFF トグル)
 
-    /// ON のとき、描き終えた手書きが直線・楕円・矩形に近ければきれいな図形へ自動置換する
     private var shapeAssistButton: some View {
         Button {
             toolState.isShapeAssistEnabled.toggle()
@@ -198,124 +323,21 @@ struct PenToolbarView: View {
         .accessibilityAddTraits(toolState.isShapeAssistEnabled ? [.isSelected] : [])
     }
 
-    // MARK: - 太さ(数値管理。Goodnotes 風にタップでスライダーポップオーバー)
-
-    private var widthControl: some View {
-        Button {
-            isWidthPopoverPresented = true
-        } label: {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color.primary)
-                    .frame(width: widthPreviewDiameter, height: widthPreviewDiameter)
-                    .frame(width: 22, height: 22)
-                Text(widthText)
-                    .font(.callout.monospacedDigit())
-                    .frame(minWidth: 48, alignment: .leading)
-            }
-            .frame(height: 34)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $isWidthPopoverPresented, arrowEdge: .top) {
-            widthPopover
-        }
-        .disabled(!toolState.isWidthAdjustable)
-        .opacity(toolState.isWidthAdjustable ? 1 : 0.35)
-    }
-
-    private var widthPopover: some View {
-        VStack(spacing: 14) {
-            Text("太さ: \(widthText)")
-                .font(.headline.monospacedDigit())
-            Slider(
-                value: Binding(
-                    get: { toolState.currentWidth },
-                    set: { toolState.currentWidth = ($0 * 2).rounded() / 2 }  // 0.5pt 刻み
-                ),
-                in: toolState.widthRange
-            )
-            // 実際の太さのプレビュー
-            Capsule()
-                .fill(Color.primary)
-                .frame(width: 180, height: min(toolState.currentWidth, 44))
-                .animation(.easeOut(duration: 0.1), value: toolState.currentWidth)
-        }
-        .padding(20)
-        .frame(width: 280)
-        .presentationCompactAdaptation(.popover)
-    }
-
-    private var widthText: String {
-        String(format: "%.1f pt", toolState.currentWidth)
-    }
-
-    /// ツールバー内に収まるよう 6〜18pt に正規化した見本サイズ
-    private var widthPreviewDiameter: CGFloat {
-        let range = toolState.widthRange
-        let span = max(range.upperBound - range.lowerBound, 0.1)
-        let t = (toolState.currentWidth - range.lowerBound) / span
-        return 6 + t * 12
-    }
-
-    // MARK: - カラーパレット
-
-    private var colorPalette: some View {
-        HStack(spacing: 8) {
-            ForEach(Array(toolState.palette.enumerated()), id: \.offset) { _, color in
-                Button {
-                    toolState.setColor(color)
-                    // カスタムカラーピッカーの表示も同期(次に開いたときに実際の色を示す)
-                    customColor = Color(uiColor: color)
-                } label: {
-                    Circle()
-                        .fill(Color(uiColor: color))
-                        .frame(width: 22, height: 22)
-                        .overlay(
-                            Circle().strokeBorder(
-                                isCurrent(color) ? Color.accentColor : Color(.separator),
-                                lineWidth: isCurrent(color) ? 2.5 : 0.5
-                            )
-                        )
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-            }
-            // カスタム色(HSB ピッカー)
-            ColorPicker("カスタム色", selection: $customColor, supportsOpacity: false)
-                .labelsHidden()
-                .frame(width: 30)
-                .onChange(of: customColor) { _, newValue in
-                    toolState.setColor(UIColor(newValue))
-                }
-        }
-        .disabled(!isColorSelectable)
-        .opacity(isColorSelectable ? 1 : 0.35)
-    }
-
-    private func isCurrent(_ color: UIColor) -> Bool {
-        toolState.currentColor == color
-    }
-
-    /// 色が選べるのはペン・マーカーのみ
-    private var isColorSelectable: Bool {
-        toolState.tool == .pen || toolState.tool == .marker
-    }
-
-    // MARK: - オブジェクト挿入(要件③)
+    // MARK: - オブジェクト挿入(画像 / PDF / Todo / ノートリンク。テキストはメインツールへ移設)
 
     private var insertMenu: some View {
         Menu {
-            Button(action: onInsertText) {
-                Label("テキスト", systemImage: "textformat")
-            }
             Button(action: onInsertImage) {
                 Label("画像", systemImage: "photo")
             }
             Button(action: onInsertPDF) {
                 Label("PDF", systemImage: "doc.text")
             }
-            Button(action: onInsertTodo) {
+            Button {
+                // 即挿入ではなく Todo 配置ツールへ(次のタップ位置に配置)
+                toolState.tool = .todo
+                toolState.isSelectMode = false
+            } label: {
                 Label("Todoリスト", systemImage: "checklist")
             }
             .accessibilityIdentifier("toolbar-insert-todo")

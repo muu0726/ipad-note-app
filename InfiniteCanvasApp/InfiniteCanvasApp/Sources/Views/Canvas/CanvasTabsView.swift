@@ -32,6 +32,8 @@ struct CanvasTabsView: View {
     @State private var showPDFImportChoice = false
     // ノートリンク挿入時のリンク先選択シート
     @State private var showNoteLinkPicker = false
+    // タブバー「＋」からの直接新規作成シート
+    @State private var showCreateNoteSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,14 +46,16 @@ struct CanvasTabsView: View {
                 onInsertPDF: { isPDFImporterPresented = true },
                 onInsertNoteLink: { showNoteLinkPicker = true },
                 onInsertTodo: { setActiveInsertion(.todo) },
+                onOpenLibrary: { session.showLibrary() },
                 onFontSizeChange: changeSelectedTextFontSize
             )
             Divider()
             // タブバーは canvasArea 内へ移動。分割時は左右ペインごとに分割表示する。
             canvasArea
         }
-        .navigationTitle(session.selectedNote?.displayTitle ?? "")
+        // 上部ナビの「書類 <」戻るボタン・タイトルは出さず、キャンバスを広く使う
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
         .photosPicker(
             isPresented: $isPhotoPickerPresented,
             selection: $photoSelection,
@@ -85,6 +89,10 @@ struct CanvasTabsView: View {
                 showNoteLinkPicker = false
             }
         }
+        // タブバー「＋」からの直接新規作成(現在のフォルダ/アクティブ側を引き継ぐ)
+        .sheet(isPresented: $showCreateNoteSheet) {
+            NoteCreateSheet(parent: activeParentFolder)
+        }
         .confirmationDialog("PDF の取り込み方法", isPresented: $showPDFImportChoice, titleVisibility: .visible) {
             Button("オブジェクトとして挿入") {
                 if let data = pendingPDFData { setActiveInsertion(.pdf(data)) }
@@ -97,19 +105,6 @@ struct CanvasTabsView: View {
         } message: {
             Text("各ページを全画面の背景に展開して、その上に手書きできます。")
         }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    session.showLibrary()
-                } label: {
-                    Label("書類", systemImage: "chevron.backward")
-                        .labelStyle(.titleAndIcon)
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                backgroundMenu
-            }
-        }
     }
 
     @ViewBuilder
@@ -120,7 +115,7 @@ struct CanvasTabsView: View {
             splitCanvas(left: left, right: right)
         } else if let note = session.selectedNote {
             VStack(spacing: 0) {
-                NoteTabBar()
+                NoteTabBar(onCreateNote: { showCreateNoteSheet = true })
                 NoteCanvasView(
                     note: note,
                     toolState: toolState,
@@ -145,7 +140,7 @@ struct CanvasTabsView: View {
             let leftWidth = available * session.splitDividerRatio
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    SideTabBar(side: .left)
+                    SideTabBar(side: .left, onCreateNote: { showCreateNoteSheet = true })
                     splitPane(note: left, side: .left,
                               bridge: leftUndoBridge, toolState: leftToolState, insertion: $leftInsertion)
                 }
@@ -156,7 +151,7 @@ struct CanvasTabsView: View {
                     handleWidth: handleWidth
                 )
                 VStack(spacing: 0) {
-                    SideTabBar(side: .right)
+                    SideTabBar(side: .right, onCreateNote: { showCreateNoteSheet = true })
                     splitPane(note: right, side: .right,
                               bridge: rightUndoBridge, toolState: rightToolState, insertion: $rightInsertion)
                 }
@@ -226,43 +221,19 @@ struct CanvasTabsView: View {
         else { rightInsertion = insertion }
     }
 
+    /// タブバー「＋」で新規作成する際に引き継ぐフォルダ(分割時はアクティブ側ペインのノート基準)
+    private var activeParentFolder: Folder? {
+        let activeNote = session.isSplitActive
+            ? (session.activeSide == .left ? resolveNote(session.leftNoteID) : resolveNote(session.rightNoteID))
+            : session.selectedNote
+        return activeNote?.folder
+    }
+
     /// objectID から開いているノートを引く(分割の左右ノート解決に使う)
     private func resolveNote(_ id: NSManagedObjectID?) -> NoteFile? {
         guard let id else { return nil }
         if let note = session.openNotes.first(where: { $0.objectID == id }) { return note }
         return (try? context.existingObject(with: id)) as? NoteFile
-    }
-
-    // MARK: - 背景テンプレート切替(要件④)
-
-    private var backgroundMenu: some View {
-        Menu {
-            ForEach(CanvasBackgroundStyle.allCases, id: \.self) { style in
-                Button {
-                    setBackground(style)
-                } label: {
-                    if currentBackground == style {
-                        Label(style.label, systemImage: "checkmark")
-                    } else {
-                        Text(style.label)
-                    }
-                }
-            }
-        } label: {
-            Label("背景", systemImage: "squareshape.split.3x3")
-        }
-        .disabled(session.selectedNote == nil)
-    }
-
-    private var currentBackground: CanvasBackgroundStyle {
-        CanvasBackgroundStyle(rawValue: session.selectedNote?.backgroundStyle ?? "") ?? .blank
-    }
-
-    private func setBackground(_ style: CanvasBackgroundStyle) {
-        guard let note = session.selectedNote else { return }
-        note.backgroundStyle = style.rawValue
-        note.updatedAt = .now
-        try? context.save()
     }
 
     /// PDF の全ページを背景に展開した新規通常ノートを作成して開く。
@@ -304,6 +275,8 @@ struct CanvasTabsView: View {
 /// キャンバス直上のタブバー(選択中タブはキャンバスと同色で一体化)
 struct NoteTabBar: View {
     @EnvironmentObject private var session: OpenNotesSession
+    /// 「＋」タップ時の新規作成(ライブラリ遷移せずその場でダイアログ)
+    var onCreateNote: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 0) {
@@ -324,9 +297,9 @@ struct NoteTabBar: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 6)
             }
-            // ライブラリから別のノートを選んで開く
+            // その場で新規ノートを作成(ライブラリへ遷移しない)
             Button {
-                session.showLibrary()
+                onCreateNote()
             } label: {
                 Image(systemName: "plus")
                     .padding(10)
@@ -341,6 +314,8 @@ struct NoteTabBar: View {
 struct SideTabBar: View {
     @EnvironmentObject private var session: OpenNotesSession
     let side: SplitSide
+    /// 「＋」タップ時の新規作成(この側をアクティブにしてからダイアログ)
+    var onCreateNote: () -> Void = {}
 
     private var sideNoteID: NSManagedObjectID? {
         side == .left ? session.leftNoteID : session.rightNoteID
@@ -365,10 +340,10 @@ struct SideTabBar: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 6)
             }
-            // ライブラリから別のノートを選び、この側で開く
+            // この側をアクティブにしてから、その場で新規ノートを作成
             Button {
                 session.activateSide(side)
-                session.showLibrary()
+                onCreateNote()
             } label: {
                 Image(systemName: "plus")
                     .padding(10)
@@ -433,7 +408,7 @@ private struct NoteTabChip: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "doc.richtext")
+            Image(systemName: note.canvasNoteType.icon)
                 .font(.caption)
             Text(note.displayTitle)
                 .font(.callout)
@@ -441,20 +416,24 @@ private struct NoteTabChip: View {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
             }
             .buttonStyle(.plain)
         }
+        // 選択タブは青地・白文字で強調
+        .foregroundStyle(isSelected ? Color.white : Color.primary)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(minWidth: 90, maxWidth: 200)
         .background(
-            isSelected ? Color(.systemBackground) : Color(.tertiarySystemBackground),
+            isSelected ? Color.accentColor : Color(.tertiarySystemBackground),
             in: UnevenRoundedRectangle(cornerRadii: .init(topLeading: 8, topTrailing: 8))
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .accessibilityIdentifier("note-tab-\(note.displayTitle)")
+        // アクティブ(表示中)のタブを UI テスト等から判別できるようにする
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .contextMenu {
             // 分割していないときだけ「右側で開く」を出す(分割中は冗長なので
             // 代わりに「分割を解除」を出す)。

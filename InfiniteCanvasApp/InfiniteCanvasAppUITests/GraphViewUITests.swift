@@ -18,6 +18,7 @@ final class GraphViewUITests: XCTestCase {
     func testGraphCountsReflectNotesAndLinks() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         // リンク先ノートとリンク元ノートを作り、リンクカードを1枚挿入する
@@ -36,7 +37,7 @@ final class GraphViewUITests: XCTestCase {
                       "リンクカードが挿入されない")
 
         // サイドバーからグラフビューを開く(識別子はラベルに付くため行セルで拾う)
-        app.buttons["書類"].tap()
+        app.buttons["canvas-to-library"].tap()
         var graphEntry = app.cells
             .containing(NSPredicate(format: "identifier == 'sidebar-graph'")).firstMatch
         if !graphEntry.waitForExistence(timeout: 3) || !graphEntry.isHittable {
@@ -97,8 +98,8 @@ final class GraphViewUITests: XCTestCase {
 
     @MainActor
     private func createNote(_ app: XCUIApplication, named name: String?) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }

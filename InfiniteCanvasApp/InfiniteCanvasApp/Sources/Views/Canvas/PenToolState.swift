@@ -4,7 +4,10 @@ import Combine
 import CoreData
 
 enum CanvasTool: String, CaseIterable {
-    case lasso, pen, marker, eraser
+    case lasso, pen, marker, eraser, text, todo
+
+    /// 描画(手書き)ではなく、タップ位置へのオブジェクト配置モードのツールか。
+    var isPlacementTool: Bool { self == .text || self == .todo }
 }
 
 /// 選択中のテキストオブジェクト情報(ツールバーのフォントサイズ UI 用)
@@ -100,10 +103,6 @@ final class PenToolState: ObservableObject {
     /// フォントサイズの調整範囲(pt)
     static let fontSizeRange: ClosedRange<CGFloat> = 12...72
 
-    /// 蛍光ペン(マーカー)インクの不透明度。前面キャンバスでは 0 にして不可視化し、
-    /// 背面ミラー(オブジェクトの下)ではこの値へ戻して描く(蛍光ペンの背面回り込み)。
-    static let markerAlpha: CGFloat = 0.5
-
     var currentWidth: CGFloat {
         get { widths[tool] ?? 3 }
         set { widths[tool] = min(max(newValue, widthRange.lowerBound), widthRange.upperBound) }
@@ -115,13 +114,13 @@ final class PenToolState: ObservableObject {
         case .pen: 0.5...20
         case .marker: 2...40
         case .eraser: 4...80
-        case .lasso: 1...1  // 未使用(太さ UI を無効化)
+        case .lasso, .text, .todo: 1...1  // 未使用(太さ UI を無効化)
         }
     }
 
     var currentColor: UIColor {
         switch tool {
-        case .pen, .eraser, .lasso: penColor
+        case .pen, .eraser, .lasso, .text, .todo: penColor
         case .marker: markerColor
         }
     }
@@ -135,7 +134,7 @@ final class PenToolState: ObservableObject {
         switch tool {
         case .pen: penColor = color
         case .marker: markerColor = color
-        case .eraser, .lasso: break
+        case .eraser, .lasso, .text, .todo: break
         }
     }
 
@@ -145,15 +144,16 @@ final class PenToolState: ObservableObject {
         case .pen:
             return PKInkingTool(.pen, color: penColor, width: currentWidth)
         case .marker:
-            // マーカーは半透明で描く。描き終えると前面キャンバスからは不可視化(alpha 0)され、
-            // オブジェクトレイヤーの下の背面ミラーへ Self.markerAlpha で描き直される
-            // (蛍光ペンがテキスト・画像の「背面に回り込む」ように見せる)。
-            return PKInkingTool(.marker, color: markerColor.withAlphaComponent(Self.markerAlpha), width: currentWidth)
+            // 標準 PencilKit マーカー(半透明はツール側が付与)。前面キャンバスへ直接描く。
+            return PKInkingTool(.marker, color: markerColor, width: currentWidth)
         case .eraser:
             // .bitmap = なぞった部分だけ消える(ストローク丸ごと消える .vector ではなく)
             return PKEraserTool(.bitmap, width: currentWidth)
         case .lasso:
             // 手書きストロークを囲って選択 → ドラッグ移動、タップでカット/コピー/削除メニュー
+            return PKLassoTool()
+        case .text, .todo:
+            // タップ配置モード。手書きジェスチャは無効化するため実質未使用(無害な投げ縄を返す)
             return PKLassoTool()
         }
     }

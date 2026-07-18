@@ -36,6 +36,8 @@ struct NoteCanvasView: View {
     @State private var currentPageIndex = 0
     /// しおり/目次からのジャンプ要求(CanvasRepresentable が処理後 nil へ戻す)
     @State private var scrollToPage: Int?
+    /// ズームを 100% に戻す要求(左上バッジのメニューから)
+    @State private var resetZoomRequested = false
     /// 現在のズーム倍率(表示用)
     @State private var currentZoomScale: CGFloat = 1.0
     /// ズームロック: true のときピンチズームを禁止する
@@ -71,6 +73,8 @@ struct NoteCanvasView: View {
                 drawing: $drawing,
                 pkTool: toolState.pkTool,
                 isSelectMode: toolState.isSelectMode,
+                placementTool: toolState.tool.isPlacementTool ? toolState.tool : nil,
+                onPlaceObject: { tool, point in placeObjectItem(tool, at: point) },
                 isShapeAssistEnabled: toolState.isShapeAssistEnabled,
                 backgroundStyle: CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank,
                 pageColor: note.canvasPageColor,
@@ -191,7 +195,9 @@ struct NoteCanvasView: View {
                 },
                 onCanvasReady: { undoBridge.attach($0) },
                 scrollToPage: scrollToPage,
-                onScrollHandled: { scrollToPage = nil }
+                onScrollHandled: { scrollToPage = nil },
+                resetZoomRequested: resetZoomRequested,
+                onZoomResetHandled: { resetZoomRequested = false }
             )
             .onChange(of: insertion) { _, request in
                 guard let request else { return }
@@ -347,9 +353,19 @@ struct NoteCanvasView: View {
     /// 現在のズーム倍率をパーセント表示し、鍵アイコンでロック/解除を切り替える。
     private var zoomIndicator: some View {
         HStack(spacing: 6) {
-            Text("\(Int((currentZoomScale * 100).rounded()))%")
-                .font(.subheadline.weight(.semibold).monospacedDigit())
-                .foregroundStyle(.primary)
+            Menu {
+                Button {
+                    resetZoomRequested = true
+                } label: {
+                    Label("100%に戻す", systemImage: "1.magnifyingglass")
+                }
+            } label: {
+                Text("\(Int((currentZoomScale * 100).rounded()))%")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("canvas-zoom-percent")
             Button {
                 isZoomLocked.toggle()
             } label: {
@@ -736,8 +752,35 @@ struct NoteCanvasView: View {
 
     // MARK: - オブジェクト挿入(要件③)
 
-    private func insert(_ request: ObjectInsertion, viewSize: CGSize) {
-        let center = insertionCenter(viewSize: viewSize)
+    /// テキスト/Todo の配置ツールで、タップ位置にオブジェクトを作成して配置モードを解除する。
+    /// タップ配置(テキスト/Todo): オブジェクトを同期生成し、生成した表示ビューを作るための
+    /// item を返す。呼び出し側(タップハンドラ)がタッチ文脈内で placeAndFocus し編集を開始する。
+    private func placeObjectItem(_ tool: CanvasTool, at point: CGPoint) -> CanvasObjectItem {
+        let request: ObjectInsertion = (tool == .todo) ? .todo : .text
+        // 配置モードを解除して投げ縄(選択モード)へ戻す。
+        toolState.tool = .lasso
+        let object = insert(request, viewSize: .zero, at: point)
+        // このパスでは placeAndFocus が同期的に選択・編集開始するので、render 経由の
+        // autoFocus は不要(二重フォーカスを避けるためクリアする)。
+        autoFocusObjectID = nil
+        return CanvasObjectItem(
+            id: object.objectID,
+            kind: object.objectKind,
+            frame: object.contentFrame,
+            text: object.text ?? "",
+            fontSize: object.fontSize > 0 ? object.fontSize : 24,
+            image: nil,
+            isLocked: object.isLocked,
+            isUserLocked: object.isUserLocked,
+            parentGroupID: object.parentGroupID,
+            linkTitle: "",
+            todoItems: object.objectKind == .todo ? object.todoItems : []
+        )
+    }
+
+    @discardableResult
+    private func insert(_ request: ObjectInsertion, viewSize: CGSize, at point: CGPoint? = nil) -> CanvasObject {
+        let center = point ?? insertionCenter(viewSize: viewSize)
         let object = CanvasObject(context: context)
         object.id = UUID()
         object.createdAt = .now
@@ -785,6 +828,7 @@ struct NoteCanvasView: View {
                 context: context, bridge: undoBridge
             )
         }
+        return object
     }
 
     /// 現在のビューポート中央(コンテンツ空間)。未スクロールなら形式ごとの初期位置
@@ -863,22 +907,14 @@ struct NoteCanvasView: View {
         let scale = min(1, 480 / max(target.width, target.height))
         let size = CGSize(width: target.width * scale, height: target.height * scale)
         let pageColor = note.canvasPageColor
-        // 蛍光ペンは前面 drawing では不可視(alpha 0)なので、ミラー相当を復元して
-        // オブジェクトの「上」・前面インクの「下」に敷き、キャンバスと同じ重なり順で合成する。
-        let markerDrawing = MarkerLayer.backingDrawing(from: drawing)
         let image = UIGraphicsImageRenderer(size: size).image { ctx in
             pageColor.backgroundUIColor.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
             ctx.cgContext.scaleBy(x: scale, y: scale)
             ctx.cgContext.translateBy(x: -target.minX, y: -target.minY)
-            // 1) オブジェクト → 2) 蛍光ペン → 3) 前面インク(ペン等)の順で重ねる
+            // 1) オブジェクト → 2) 前面インク(ペン・マーカーとも drawing に含まれる)の順で重ねる
             for object in objects where !object.isDeleted {
                 object.drawInThumbnail(pageColor: pageColor)
-            }
-            if !markerDrawing.strokes.isEmpty {
-                UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-                    markerDrawing.image(from: target, scale: scale).draw(in: target)
-                }
             }
             // キャンバスと同様、ダークモードでのインク色自動反転を避けて描き出す
             UITraitCollection(userInterfaceStyle: .light).performAsCurrent {

@@ -19,6 +19,7 @@ final class SplitViewUITests: XCTestCase {
         // キャンバスは既定で Pencil Only(指では描けない)。XCUITest は Pencil 入力を
         // 模倣できないため、指描画を許可して描画系(Undo有効化)を検証する。
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         let nameA = "SPLA\(Int.random(in: 10000...99999))"
@@ -64,6 +65,7 @@ final class SplitViewUITests: XCTestCase {
     func testSplitTabBarIsPerPane() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         let nameA = "TBA\(Int.random(in: 10000...99999))"
@@ -115,6 +117,7 @@ final class SplitViewUITests: XCTestCase {
     func testReopenFromLibraryKeepsSplitAndSide() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
 
         let nameA = "RLA\(Int.random(in: 10000...99999))"
@@ -130,7 +133,7 @@ final class SplitViewUITests: XCTestCase {
         XCTAssertTrue(element(app, id: "split-divider").waitForExistence(timeout: 5), "分割が始まらない")
 
         // 「書類」でライブラリへ戻り、左タブ B をグリッドから開き直す(= session.open)
-        app.buttons["書類"].firstMatch.tap()
+        app.buttons["canvas-to-library"].tap()
         let gridB = element(app, id: "grid-note-\(nameB)")
         XCTAssertTrue(gridB.waitForExistence(timeout: 5), "グリッドに \(nameB) が無い")
         gridB.tap()
@@ -168,8 +171,8 @@ final class SplitViewUITests: XCTestCase {
 
     @MainActor
     private func createNote(_ app: XCUIApplication, named name: String) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }

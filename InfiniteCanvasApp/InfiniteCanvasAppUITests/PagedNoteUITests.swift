@@ -17,6 +17,7 @@ final class PagedNoteUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         createPagedNote(app)
 
@@ -40,6 +41,7 @@ final class PagedNoteUITests: XCTestCase {
     func testHorizontalOverscrollAddsPage() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         createPagedNote(app)
 
@@ -63,6 +65,7 @@ final class PagedNoteUITests: XCTestCase {
     func testDeletePageRemovesObjectsAndUndoRestores() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         createPagedNote(app)
         XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
@@ -78,13 +81,21 @@ final class PagedNoteUITests: XCTestCase {
         }
         XCTAssertTrue(added, "オーバースクロールで2ページ目を追加できない")
 
-        // ページ追加に伴うスクロールアニメーションの完了を待つ
-        Thread.sleep(forTimeInterval: 1.0)
+        // ページ追加に伴うスクロールアニメーションの完了を待つ(ランループを回すため XCTWaiter を使用)
+        _ = XCTWaiter.wait(for: [XCTestExpectation(description: "scrollAnimation")], timeout: 1.2)
 
-        // 末尾ページ(2ページ目)にテキストオブジェクトを挿入(削除対象のページに載る)
+        // 末尾ページ(2ページ目)にテキストオブジェクトを挿入(削除対象のページに載る)。
+        // ページ2へスクロールしようとすると、ページ2は末尾なので到達時に慣性で末端を超え
+        // 3ページ目が追加されてしまう。そこでスクロールせず、画面右寄りをタップして
+        // (画面右側に見えている)ページ2へ直接配置する。
         let marker = "\(Int.random(in: 10_000_000...99_999_999))"
-        app.buttons["toolbar-insert-menu"].tap()
-        app.buttons["テキスト"].tap()
+        app.buttons["toolbar-tool-text"].tap()
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        // 配置直後は選択・編集状態。シミュレータではプログラム的フォーカスに
+        // ソフトキーボードが追従しないため、配置したテキストを一度タップして編集を開始する。
+        let placedText = app.textViews.firstMatch
+        XCTAssertTrue(placedText.waitForExistence(timeout: 5), "テキストが配置されない")
+        placedText.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "編集が始まらない")
         app.typeText(marker)
         // 編集を確定してキーボードを閉じるため、ツールバーのペンツールボタンをタップする
@@ -99,7 +110,9 @@ final class PagedNoteUITests: XCTestCase {
         //  削除/Undo/Redo を「削除ボタンの出没」で確定的に検証する)
         XCTAssertTrue(deletePage.waitForExistence(timeout: 3), "ページ削除ボタンが出ない")
         deletePage.tap()
-        app.buttons["削除"].tap()
+        let confirmDelete = app.buttons["削除"]
+        XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5), "削除確認が出ない")
+        confirmDelete.tap()
         // ページ数が1に戻る(削除ボタンが消える)。marker も画面から消える。
         expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: markerView)
         waitForExpectations(timeout: 5)
@@ -123,8 +136,8 @@ final class PagedNoteUITests: XCTestCase {
 
     @MainActor
     private func createPagedNote(_ app: XCUIApplication) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }
@@ -137,7 +150,7 @@ final class PagedNoteUITests: XCTestCase {
 
     @MainActor
     private func segment(_ app: XCUIApplication, id: String) -> XCUIElement {
-        app.descendants(matching: .any).matching(identifier: id).firstMatch
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@", id)).firstMatch
     }
 
     @MainActor

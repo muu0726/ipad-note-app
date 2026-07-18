@@ -16,6 +16,7 @@ final class PagedLayoutUITests: XCTestCase {
         let app = XCUIApplication()
         // XCUITest は Pencil 入力を模倣できないため、指描画を許可して描画系を検証する
         app.launchEnvironment["ALLOW_FINGER_DRAWING"] = "1"
+        app.launchEnvironment["RESET_STORE"] = "1"  // テスト毎にDBを初期化(蓄積防止)
         app.launch()
         createPagedNote(app)
 
@@ -62,8 +63,8 @@ final class PagedLayoutUITests: XCTestCase {
 
     @MainActor
     private func createPagedNote(_ app: XCUIApplication) {
-        let backToLibrary = app.buttons["書類"]
-        if backToLibrary.waitForExistence(timeout: 3) { backToLibrary.tap() }
+        let backToLibrary = app.buttons["toolbar-tool-pen"]
+        if backToLibrary.waitForExistence(timeout: 3) { app.buttons["canvas-to-library"].tap() }
         let addTile = app.buttons["add-note-tile"]
         if addTile.waitForExistence(timeout: 5) { addTile.tap() }
         else { app.buttons["新規ノート"].firstMatch.tap() }

@@ -224,9 +224,36 @@ final class ObjectLayerUIView: UIView {
     }
 
     /// 挿入直後のフォーカス。テキストならそのまま編集を開始する
-    func focus(on id: NSManagedObjectID) {
+    /// 指定オブジェクトを選択し、テキスト編集を開始する。
+    /// 挿入直後は @FetchRequest 反映前でビューが未生成のことがある。その場合は false を返し、
+    /// 呼び出し側(handleAutoFocus)が次の更新で再試行できるようにする。
+    @discardableResult
+    func focus(on id: NSManagedObjectID) -> Bool {
         select(id)
-        objectViews[id]?.beginTextEditing()
+        guard let view = objectViews[id] else { return false }
+        view.beginTextEditing()
+        return true
+    }
+
+    /// タップ配置(テキスト/Todo)専用: タップのタッチ文脈内でビューを生成し、選択・編集開始する。
+    /// render 経由の autoFocus では becomeFirstResponder がタッチ文脈外になりソフトキーボードが
+    /// 表示されないため、タップハンドラから同期的に呼ぶ。同 id の既存ビューがあれば再利用し、
+    /// 次の syncObjects でも重複しない(objectID をキーにしているため)。
+    func placeAndFocus(item: CanvasObjectItem) {
+        let view: CanvasObjectUIView
+        if let existing = objectViews[item.id] {
+            view = existing
+        } else {
+            view = CanvasObjectUIView(item: item, layerView: self)
+            objectViews[item.id] = view
+            addSubview(view)
+            view.updatePageColor(pageColor)
+        }
+        view.apply(item)
+        bringSubviewToFront(view)
+        layoutIfNeeded()          // 編集開始前にレイアウトを確定させる
+        select(item.id)
+        view.beginTextEditing()   // 配置と同時に編集開始(実機ではソフトキーボードも表示)
     }
 
     /// 選択モード中、オブジェクトのない場所のタップで選択解除(コンテナから呼ばれる)
@@ -584,6 +611,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     func setSelected(_ selected: Bool) {
         isSelected = selected
         layer.borderWidth = selected ? 2 : 0
+        if kind == .noteLink {
+            // ノートリンクは角丸カード自体の枠を青く太くして選択を示す(矩形の外枠は出さない)
+            layer.borderWidth = 0
+            linkCard.layer.borderColor = (selected ? UIColor.systemBlue : UIColor.separator).cgColor
+            linkCard.layer.borderWidth = selected ? 2.0 : 0.5
+        }
         if !selected { endTextEditing() }
         refreshSelectionChrome()
     }
