@@ -13,6 +13,25 @@ final class InfiniteCanvasFreeformUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// 通常ノート(paged)でピンチインするとズーム倍率が上がること(scrollView 化前は
+    /// フィット倍率 ≈0.51 付近で頭打ちになる回帰があった。commit 9902de5 で解消)。
+    /// ※ ズームアウト(ピンチ scale<1)は XCUITest では paged/infinite とも合成できないため
+    ///   自動検証しない(min=フィット倍率であり実機は UIScrollView 標準で動作する)。
+    @MainActor
+    func testPagedPinchZoomsIn() throws {
+        let app = launchApp()
+        try openPagedNote(app)   // 既定は infinite のため paged を明示選択
+        let window = app.windows.firstMatch
+        let start = zoomPercent(app)
+        XCTAssertGreaterThan(start, 0, "初期ズーム%が読めない")
+        for _ in 0..<3 { window.pinch(withScale: 3.0, velocity: 3.0) }
+        let zoomed = zoomPercent(app)
+        XCTAssertGreaterThan(
+            zoomed, start + 20,
+            "paged でピンチインしてもズームが上がらない(回帰): start=\(start)% zoomed=\(zoomed)%"
+        )
+    }
+
     /// #3: テキストオブジェクトを置いて最大ズームまでピンチしても、オブジェクトが
     /// アクセシビリティ上もスクリーン上も存在し続けること。
     @MainActor
@@ -190,6 +209,27 @@ final class InfiniteCanvasFreeformUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// 通常ノート(paged)を新規作成して開く。作成シートは既定 infinite のため用紙種別を明示選択する。
+    @MainActor
+    private func openPagedNote(_ app: XCUIApplication) throws {
+        let inCanvas = app.buttons["toolbar-tool-pen"]
+        app.buttons["新規ノート"].tap()
+        // セグメント Picker から「通常ノート」を選ぶ(identifier 優先、無ければラベル)
+        let byID = app.descendants(matching: .any).matching(identifier: "note-type-paged").firstMatch
+        let byLabel = app.buttons["通常ノート"]
+        if byID.waitForExistence(timeout: 3) {
+            byID.tap()
+        } else if byLabel.waitForExistence(timeout: 3) {
+            byLabel.tap()
+        } else {
+            XCTFail("作成シートに用紙種別ピッカーが無い")
+        }
+        let confirmCreate = app.buttons["dialog-create-button"]
+        XCTAssertTrue(confirmCreate.waitForExistence(timeout: 5), "作成シートが開かない")
+        confirmCreate.tap()
+        XCTAssertTrue(inCanvas.waitForExistence(timeout: 5), "paged ノートが開かない")
     }
 
     @MainActor
