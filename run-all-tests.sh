@@ -169,6 +169,22 @@ GROUP_7_TARGETS=(
   "InfiniteCanvasAppUITests/ScrollSyncUITests"
 )
 
+# 8. 図形・表・カスタムペン UI テスト (追加機能)
+GROUP_8_DESC="[Group 8: 図形/表/カスタムペン UI テスト] 拡張オブジェクト操作 (図形配置/編集、表セル編集/幅調整、お気に入りペン管理)"
+GROUP_8_TARGETS=(
+  "InfiniteCanvasAppUITests/ShapeObjectUITests"
+  "InfiniteCanvasAppUITests/TableObjectUITests"
+  "InfiniteCanvasAppUITests/CustomPenUITests"
+)
+
+# 9. フリーフォーム・システム UI テスト (全般ウォークスルー)
+GROUP_9_DESC="[Group 9: フリーフォーム/システム UI テスト] キャンバスパン・ズーム、ストアリセット、全体ウォークスルー"
+GROUP_9_TARGETS=(
+  "InfiniteCanvasAppUITests/InfiniteCanvasFreeformUITests"
+  "InfiniteCanvasAppUITests/StoreResetUITests"
+  "InfiniteCanvasAppUITests/AppWalkthroughUITests"
+)
+
 # 全グループをまとめる
 GROUPS_DESC=(
   "$GROUP_1_DESC"
@@ -178,6 +194,8 @@ GROUPS_DESC=(
   "$GROUP_5_DESC"
   "$GROUP_6_DESC"
   "$GROUP_7_DESC"
+  "$GROUP_8_DESC"
+  "$GROUP_9_DESC"
 )
 
 # -------------------------------------------------------------
@@ -245,8 +263,8 @@ append_fail_task() {
       done
     fi
     
-    echo "  - **ログファイル**: [${target##*/}.log](file://$(pwd)/$log_file)"
-    echo "  - **詳細結果 (.xcresult)**: [${target##*/}.xcresult](file://$(pwd)/$xcresult_path)"
+    echo "  - **ログファイル**: [${target##*/}.log](file://$(pwd)/$LOG_DIR/$(basename "$log_file"))"
+    echo "  - **詳細結果 (.xcresult)**: [${target##*/}.xcresult](file://$(pwd)/$XCRESULT_PATH)"
     if [[ -n "$ss_info" ]]; then
       echo "$ss_info"
     fi
@@ -283,7 +301,7 @@ PASS=(); FAIL=()
 RUN_COUNT=0
 
 # 各グループ順に実行
-for GI in {0..6}; do
+for GI in {0..8}; do
   DESC="${GROUPS_DESC[$GI]}"
   
   # グループ内に対象ターゲットがあるか事前に確認
@@ -295,6 +313,8 @@ for GI in {0..6}; do
     4) TARGETS=("${GROUP_5_TARGETS[@]}") ;;
     5) TARGETS=("${GROUP_6_TARGETS[@]}") ;;
     6) TARGETS=("${GROUP_7_TARGETS[@]}") ;;
+    7) TARGETS=("${GROUP_8_TARGETS[@]}") ;;
+    8) TARGETS=("${GROUP_9_TARGETS[@]}") ;;
   esac
 
   ANY_RUN=false
