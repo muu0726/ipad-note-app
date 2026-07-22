@@ -367,6 +367,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             textView.textContainerInset = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
             textView.delegate = self
             addSubview(textView)
+            updateTextAccessibility()
         case .image, .pdf:
             imageView.contentMode = .scaleToFill  // アスペクト比はフレーム側で維持する
             imageView.clipsToBounds = true
@@ -617,6 +618,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if kind == .text, !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
+        if kind == .text { updateTextAccessibility() }
         // 編集中はビュー側が真値なので上書きしない(テキストと同様のガード)
         if kind == .todo, !todoListView.isEditing {
             todoListView.setItems(item.todoItems)
@@ -733,6 +735,17 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         }
     }
 
+    /// テキストの内容を、編集していないときでも XCUITest / VoiceOver から取得できるようにする。
+    /// 非編集時は isUserInteractionEnabled=false で UITextView が「Disabled」になり、既定では
+    /// テキストを accessibility value として公開しなくなる(選択解除後に要素が value 検索で
+    /// 見つからなくなる)。ここで identifier と value を明示して常時参照可能にする。
+    private func updateTextAccessibility() {
+        guard kind == .text else { return }
+        textView.isAccessibilityElement = true
+        textView.accessibilityIdentifier = "canvas-object-text"
+        textView.accessibilityValue = textView.text
+    }
+
     // MARK: - テキスト編集
 
     func beginTextEditing() {
@@ -751,6 +764,11 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
     private func endTextEditing() {
         if kind == .text, textView.isFirstResponder {
+            // 入力内容を resignFirstResponder より先に永続化する。
+            // resign から textViewDidEndEditing までの間に選択変更由来の再描画で
+            // apply(_:) が走ると、まだ空のモデル値で入力済みテキストを上書き消去して
+            // しまう競合があるため、ここで先にモデルへ確定させて競合を断つ。
+            layerView?.onTextChanged?(objectID, textView.text ?? "")
             textView.resignFirstResponder()
         } else if kind == .todo {
             todoListView.endEditing(true)
@@ -770,11 +788,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             contentFrame.size.height = newHeight
             applyPlacement()
         }
+        updateTextAccessibility()
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {
         textView.isEditable = false
         textView.isUserInteractionEnabled = false
+        updateTextAccessibility()
         layerView?.onTextChanged?(objectID, textView.text ?? "")
         layerView?.onFrameChanged?(objectID, contentFrame)  // 自動拡張した高さを保存
     }

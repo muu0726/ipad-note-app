@@ -85,12 +85,13 @@ final class PagedNoteUITests: XCTestCase {
         _ = XCTWaiter.wait(for: [XCTestExpectation(description: "scrollAnimation")], timeout: 1.2)
 
         // 末尾ページ(2ページ目)にテキストオブジェクトを挿入(削除対象のページに載る)。
-        // ページ2へスクロールしようとすると、ページ2は末尾なので到達時に慣性で末端を超え
-        // 3ページ目が追加されてしまう。そこでスクロールせず、画面右寄りをタップして
-        // (画面右側に見えている)ページ2へ直接配置する。
+        // ページ追加時は新ページが画面中央へ寄せられる(PagePlanner.scrollOffsetX は
+        // 用紙幅 ≤ 画面幅のとき用紙を中央スナップする)。用紙は画面の概ね中央 30〜70% を
+        // 占めるため、画面中央をタップして(スクロールせず)ページ2へ直接配置する。
+        // 端(0.85 等)はグレーの机領域=用紙外となり、配置ゲートに正しく弾かれる。
         let marker = "\(Int.random(in: 10_000_000...99_999_999))"
         app.buttons["toolbar-tool-text"].tap()
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         // 配置直後は選択・編集状態。シミュレータではプログラム的フォーカスに
         // ソフトキーボードが追従しないため、配置したテキストを一度タップして編集を開始する。
         let placedText = app.textViews.firstMatch
