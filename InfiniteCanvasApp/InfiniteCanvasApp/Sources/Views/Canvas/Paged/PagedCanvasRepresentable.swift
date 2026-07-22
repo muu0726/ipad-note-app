@@ -27,6 +27,8 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
     let isTwoPageLayout: Bool
     /// ズームロック: true のときピンチズームを禁止する(min/max を現在値に固定)
     let isZoomLocked: Bool
+    /// 「隣のページを隠す(完全独立表示モード)」。ON でスクロール停止時にアクティブページ以外を遮蔽する。
+    let hideAdjacentPages: Bool
     let objects: [CanvasObject]
     /// 挿入直後に選択(テキストなら編集開始)するオブジェクト
     let autoFocusObjectID: NSManagedObjectID?
@@ -85,6 +87,7 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
         container.placementTool = placementTool
         container.onPlaceObject = onPlaceObject
         container.isZoomLocked = isZoomLocked
+        container.hideAdjacentPages = hideAdjacentPages
         container.pendingInitialViewport = initialViewport
         container.applyLayout(style: backgroundStyle, pageColor: pageColor)
         container.distribute(merged: drawing)
@@ -171,6 +174,7 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
         container.placementTool = placementTool
         container.onPlaceObject = onPlaceObject
         container.isZoomLocked = isZoomLocked
+        container.hideAdjacentPages = hideAdjacentPages
 
         let layoutModeChanged = isTwoPageLayout != coordinator.lastIsTwoPage
         let pageAppended = pageCount > coordinator.lastPageCount

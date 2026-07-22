@@ -245,6 +245,7 @@ struct NoteCanvasView: View {
                 pageCount: note.resolvedPageCount,
                 isTwoPageLayout: note.isTwoPageLayout,
                 isZoomLocked: isZoomLocked,
+                hideAdjacentPages: note.hideAdjacentPages,
                 objects: Array(objects),
                 autoFocusObjectID: autoFocusObjectID,
                 initialViewport: session.viewports[note.objectID],
@@ -435,6 +436,11 @@ struct NoteCanvasView: View {
                 set: { setLayout(twoPage: $0, horizontal: true) }
             ))
             .accessibilityIdentifier("toggle-two-page")
+            Toggle("隣のページを隠す", isOn: Binding(
+                get: { note.hideAdjacentPages },
+                set: { setHideAdjacentPages($0) }
+            ))
+            .accessibilityIdentifier("toggle-hide-adjacent")
             // 通常ノートは横スクロール(ページめくり)固定。末尾を超えて引っ張ると自動でページ追加。
             Text("横スクロール(ページめくり)。最後のページの先へ引っ張るとページが追加されます。")
                 .font(.caption)
@@ -453,6 +459,17 @@ struct NoteCanvasView: View {
             try context.save()
         } catch {
             assertionFailure("レイアウト設定の保存に失敗: \(error)")
+        }
+    }
+
+    /// 「隣のページを隠す(完全独立表示モード)」を更新して保存する(キャンバスは note 変化で即反映)。
+    private func setHideAdjacentPages(_ value: Bool) {
+        note.hideAdjacentPages = value
+        note.updatedAt = .now
+        do {
+            try context.save()
+        } catch {
+            assertionFailure("設定の保存に失敗: \(error)")
         }
     }
 

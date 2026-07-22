@@ -54,6 +54,9 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
     let contentView = UIView()
     let backgroundView = BackgroundPatternUIView()
     let objectLayer = ObjectLayerUIView()
+    /// 「隣のページを隠す」モードでアクティブページの左右を覆う机色マスク(コンテンツ座標・最前面)
+    private let leftMask = UIView()
+    private let rightMask = UIView()
 
     /// 実体化中のページキャンバス(pageIndex → canvas)
     private(set) var pageCanvases: [Int: PageCanvasView] = [:]
@@ -67,6 +70,13 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
         didSet { for canvas in pageCanvases.values { canvas.tool = pkTool } }
     }
     var isZoomLocked = false { didSet { updateZoomLimits() } }
+    /// 「隣のページを隠す(完全独立表示モード)」。ON でスクロール停止時にアクティブページ以外を遮蔽する。
+    var hideAdjacentPages = false {
+        didSet {
+            guard hideAdjacentPages != oldValue else { return }
+            updateAdjacentPageMask()
+        }
+    }
     /// タップ位置配置モードのツール(.text / .todo)。nil のとき通常のタップ(選択解除)。
     var placementTool: CanvasTool? {
         didSet {
@@ -106,6 +116,8 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
     private(set) var lastMergedDrawing = PKDrawing()
     /// 末尾オーバースクロールでのページ追加を要求済みか(1ドラッグにつき1回)
     var didRequestPageAppend = false
+    /// スクロール(ドラッグ/慣性)中か。true の間はマスクを一時的に外して滑らかにスライドさせる。
+    private var isScrollActive = false
     /// 初回フィット済みか(bounds 確定後に一度だけ)
     private var didInitialFit = false
     /// 復元待ちのビューポート(bounds 確定後に適用)
@@ -138,6 +150,17 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
         contentView.addSubview(backgroundView)
         contentView.addSubview(objectLayer)
         objectLayer.clipsToBounds = false  // ページ間へはみ出したオブジェクトも見せる(タッチも層が受ける)
+
+        // 「隣のページを隠す」マスク(既定は非表示)。机色で覆い、タッチは下のスクロール/ページへ素通しする。
+        for (mask, id) in [(leftMask, "paged-adjacent-mask-left"), (rightMask, "paged-adjacent-mask-right")] {
+            mask.backgroundColor = .systemGray5
+            mask.isUserInteractionEnabled = false
+            mask.isHidden = true
+            // 非表示時はツリーに現れないため、XCUITest で ON/OFF を検証できるよう要素として公開する
+            mask.isAccessibilityElement = true
+            mask.accessibilityIdentifier = id
+            contentView.addSubview(mask)
+        }
 
         // オブジェクトのない場所のタップで選択解除 / 配置モードのタップ配置
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap(_:)))
@@ -186,6 +209,7 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
         for (index, canvas) in pageCanvases { canvas.frame = layout.pageRect(index) }
         updateZoomLimits()
         updateVisiblePages()
+        updateAdjacentPageMask()  // 見開きトグル等でページ矩形が動いたらマスクも再計算
     }
 
     /// contentView / 背景 / オブジェクト層をコンテンツ座標サイズへ合わせる。
@@ -243,6 +267,7 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
             materializeCanvas(at: index)
         }
         notifyActiveCanvasIfNeeded()
+        updateAdjacentPageMask()  // materialize 後にマスクを最前面へ保ち、アクティブ変化へ追従
     }
 
     private func materializeCanvas(at index: Int) {
@@ -312,6 +337,34 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
             if d < bestDistance { bestDistance = d; best = i }
         }
         return best
+    }
+
+    // MARK: - 隣のページを隠す(完全独立表示モード)
+
+    /// アクティブページ以外を机色マスクで覆う(定常時のみ)。スクロール中(isScrollActive)は
+    /// 隣ページを見せて滑らかにスライドさせるため一旦外す。マスクはコンテンツ座標の contentView 子
+    /// なのでズーム/スクロール追従は自動。ページ実体化(materialize)の後に呼ぶと最前面を保てる。
+    private func updateAdjacentPageMask() {
+        guard hideAdjacentPages, !isScrollActive, bounds.width > 0, layout.pageCount > 0 else {
+            leftMask.isHidden = true
+            rightMask.isHidden = true
+            return
+        }
+        let rects = AdjacentPageMask.maskRects(activePage: currentPageIndex(), layout: layout)
+        leftMask.frame = rects.left
+        rightMask.frame = rects.right
+        leftMask.isHidden = rects.left.width <= 0
+        rightMask.isHidden = rects.right.width <= 0
+        // materialize で後から addSubview されるページキャンバスより前面に保つ
+        contentView.bringSubviewToFront(leftMask)
+        contentView.bringSubviewToFront(rightMask)
+    }
+
+    /// スクロール開始/停止でマスクの一時解除・再適用を切り替える。
+    private func setScrollActive(_ active: Bool) {
+        guard isScrollActive != active else { return }
+        isScrollActive = active
+        updateAdjacentPageMask()
     }
 
     // MARK: - 描画の配布と回収
@@ -522,6 +575,11 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { contentView }
 
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        // めくり中は隣ページを見せて滑らかにスライドさせる(定常時に再遮蔽)
+        setScrollActive(true)
+    }
+
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateVisiblePages()
         emitViewport()
@@ -560,6 +618,16 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
             didRequestPageAppend = true  // ページ数増加の反映時に解除される
             onAppendPage?()
         }
+        // 減速へ移らずここで止まる場合は停止確定。減速するなら scrollViewDidEndDecelerating で再遮蔽する。
+        if !decelerate { setScrollActive(false) }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        setScrollActive(false)  // 慣性停止 → 隣ページを再遮蔽
+    }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        setScrollActive(false)  // プログラムスクロールのアニメ停止 → 再遮蔽
     }
 
     /// カスタムページスナップ(横スクロールのみ)。フリック速度とズームを考慮して
