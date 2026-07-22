@@ -10,6 +10,8 @@ enum ObjectInsertion: Equatable {
     case pdf(Data)
     case noteLink(UUID)  // 他のノートへのリンクカード
     case todo            // チェックリスト
+    case shape(ShapeType)  // 図形(矩形・楕円・三角・直線・矢印・星)
+    case table(rows: Int, cols: Int)  // 表(Excel風)
 }
 
 /// 1つのノートの無限キャンバス。
@@ -42,6 +44,14 @@ struct NoteCanvasView: View {
     @State private var currentZoomScale: CGFloat = 1.0
     /// ズームロック: true のときピンチズームを禁止する
     @State private var isZoomLocked = false
+    /// 編集ポップオーバーを開いている図形(ダブルタップで開く)。nil で閉じる。
+    @State private var editingShape: EditingShape?
+
+    /// 図形編集ポップオーバーの対象。開いた時点の payload を控え、閉じるときに 1つの Undo として登録する。
+    private struct EditingShape: Identifiable {
+        let id: NSManagedObjectID
+        let previousPayload: Data?
+    }
 
     init(
         note: NoteFile,
@@ -69,136 +79,7 @@ struct NoteCanvasView: View {
 
     var body: some View {
         GeometryReader { geo in
-            CanvasRepresentable(
-                drawing: $drawing,
-                pkTool: toolState.pkTool,
-                isSelectMode: toolState.isSelectMode,
-                placementTool: toolState.tool.isPlacementTool ? toolState.tool : nil,
-                onPlaceObject: { tool, point in placeObjectItem(tool, at: point) },
-                isShapeAssistEnabled: toolState.isShapeAssistEnabled,
-                backgroundStyle: CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank,
-                pageColor: note.canvasPageColor,
-                noteType: note.canvasNoteType,
-                pageCount: note.resolvedPageCount,
-                isTwoPageLayout: note.isTwoPageLayout,
-                // 通常ノートは横スクロール固定(既存サービス同様のページめくり)
-                isHorizontalScroll: note.canvasNoteType == .paged ? true : note.isHorizontalScroll,
-                isZoomLocked: isZoomLocked,
-                objects: Array(objects),
-                autoFocusObjectID: autoFocusObjectID,
-                initialViewport: session.viewports[note.objectID],
-                onDrawingChanged: {
-                    onActivate()          // 描いた側を分割のアクティブ側にする
-                    scheduleAutoSave()
-                    undoBridge.refresh()  // 描画のたびに戻る/やり直しボタンの状態を更新
-                },
-                onViewportChanged: { viewport in
-                    session.updateViewport(viewport, for: note.objectID)
-                    // ズーム倍率を追跡(左上の倍率表示用)
-                    if viewport.zoomScale > 0 {
-                        let rounded = (viewport.zoomScale * 100).rounded()
-                        let current = (currentZoomScale * 100).rounded()
-                        if rounded != current { currentZoomScale = viewport.zoomScale }
-                    }
-                    // 通常ノートは現在ページを追跡(しおりトグル/目次追加の対象・変化時のみ更新)
-                    if note.canvasNoteType == .paged, geo.size.width > 0 {
-                        let page = PagePlanner.currentPage(
-                            contentOffsetX: viewport.contentOffset.x, viewWidth: geo.size.width,
-                            zoomScale: viewport.zoomScale,
-                            layout: PagedLayoutCalculator(pageCount: note.resolvedPageCount,
-                                                          isTwoPageLayout: note.isTwoPageLayout,
-                                                          isHorizontalScroll: true)
-                        )
-                        if page != currentPageIndex { currentPageIndex = page }
-                    }
-                },
-                onObjectFrameChanged: { id, frame in
-                    withObject(id) { object in
-                        let previous = object.contentFrame
-                        object.contentFrame = frame
-                        if previous != frame, let uuid = object.id {
-                            CanvasObjectUndo.registerFrameChange(
-                                objectUUID: uuid, previousFrame: previous,
-                                in: undoBridge.activeUndoManager,
-                                context: context, bridge: undoBridge
-                            )
-                        }
-                    }
-                },
-                onObjectTextChanged: { id, text in
-                    withObject(id) { object in
-                        let previous = object.text ?? ""
-                        object.text = text
-                        if previous != text, let uuid = object.id {
-                            CanvasObjectUndo.registerTextChange(
-                                objectUUID: uuid, previousText: previous,
-                                in: undoBridge.activeUndoManager,
-                                context: context, bridge: undoBridge
-                            )
-                        }
-                    }
-                },
-                onObjectTodoChanged: { id, items in
-                    withObject(id) { object in
-                        let previous = object.payload
-                        object.todoItems = items
-                        if previous != object.payload, let uuid = object.id {
-                            CanvasObjectUndo.registerPayloadChange(
-                                objectUUID: uuid, previousPayload: previous,
-                                in: undoBridge.activeUndoManager,
-                                context: context, bridge: undoBridge
-                            )
-                        }
-                    }
-                },
-                onObjectDeleted: { id in
-                    withObject(id) { object in
-                        if let snapshot = CanvasObjectSnapshot(object: object) {
-                            CanvasObjectUndo.registerDelete(
-                                snapshot: snapshot,
-                                in: undoBridge.activeUndoManager,
-                                context: context, bridge: undoBridge
-                            )
-                        }
-                        context.delete(object)
-                    }
-                },
-                onObjectAutoHeightChanged: { id, height in
-                    // フォント変更に伴う高さ調整は Undo を積まずに保存(フォント変更 Undo に追従)
-                    withObject(id) { $0.contentFrame.size.height = height }
-                },
-                onTextSelectionChanged: { info in
-                    if let info {
-                        toolState.selectedTextObject = SelectedTextObject(
-                            objectID: info.objectID, fontSize: info.fontSize
-                        )
-                    } else {
-                        toolState.selectedTextObject = nil
-                    }
-                },
-                onLassoObjectsMoved: { region, delta in
-                    moveObjectsWithLasso(in: region, by: delta)
-                },
-                onLassoObjectsDeleted: { region in
-                    deleteObjectsWithLasso(in: region)
-                },
-                onNoteLinkActivated: { id in
-                    openLinkedNote(objectID: id)
-                },
-                onToggleUserLock: { id in toggleUserLock(objectID: id) },
-                onGroupObjects: { ids in groupObjects(ids) },
-                onUngroupObjects: { ids in ungroupObjects(ids) },
-                onAppendPage: { addPage() },
-                onSelectionChanged: { hasSelection in
-                    // オブジェクトの選択有無を選択モードへ反映(描画停止・単指操作の切替)
-                    toolState.isSelectMode = hasSelection
-                },
-                onCanvasReady: { undoBridge.attach($0) },
-                scrollToPage: scrollToPage,
-                onScrollHandled: { scrollToPage = nil },
-                resetZoomRequested: resetZoomRequested,
-                onZoomResetHandled: { resetZoomRequested = false }
-            )
+            canvasContent(geo: geo)
             .onChange(of: insertion) { _, request in
                 guard let request else { return }
                 insert(request, viewSize: geo.size)
@@ -231,6 +112,28 @@ struct NoteCanvasView: View {
                 Button("キャンセル", role: .cancel) {}
             } message: {
                 Text("このページ上の手書きとオブジェクトも削除されますがよろしいですか？")
+            }
+            // 図形編集ポップオーバー(線色 / 塗り / 太さ)。閉じるときに 1つの Undo を積む。
+            // 全画面ビューをアンカーにすると高さが潰れて内容が切れるため、中央の極小ビューへ出す。
+            .overlay(alignment: .center) {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .popover(item: Binding(
+                        get: { editingShape },
+                        set: { newValue in
+                            if newValue == nil, let editing = editingShape { commitShapeEdit(editing) }
+                            editingShape = newValue
+                        }
+                    )) { editing in
+                        if let object = (try? context.existingObject(with: editing.id)) as? CanvasObject,
+                           let payload = object.shapePayload {
+                            ShapeEditPopover(
+                                initial: payload,
+                                palette: toolState.palette,
+                                onUpdate: { updated in updateShapePayload(editing.id, updated) }
+                            )
+                        }
+                    }
             }
         }
         // 通常ノートのレイアウト設定(見開き / 横スクロール)
@@ -303,6 +206,14 @@ struct NoteCanvasView: View {
                 note.isHorizontalScroll = true
                 try? context.save()
             }
+            // 通常ノート: ページ構造 Undo(ページ削除/並び替えの復元)の merged 差し替えは
+            // ページ分割キャンバスへ直接書けないため、@State 経由で配布経路へ流す
+            if note.canvasNoteType == .paged {
+                undoBridge.onReplaceDrawing = { merged in
+                    drawing = merged
+                    scheduleAutoSave()
+                }
+            }
         }
         .onDisappear {
             // タブ切替・ライブラリ復帰時は即時保存
@@ -310,7 +221,206 @@ struct NoteCanvasView: View {
             persist()
             session.flushViewports()  // 保留中のスクロール位置も確定
             toolState.selectedTextObject = nil  // 別タブへ選択を持ち越さない
+            undoBridge.onReplaceDrawing = nil   // 差し替え先をこのノートに残さない
         }
+    }
+
+    // MARK: - キャンバス本体(ノート形式で実装を分岐)
+
+    /// 通常ノートは GoodNotes 型のページ分割キャンバス(ページ外に描画面が存在しない)、
+    /// 無限キャンバスは従来の単一巨大キャンバス。パラメータ・コールバックは同名で揃えてあり、
+    /// ハンドラ(handle〜 / 既存メソッド)を両者で共有する。
+    @ViewBuilder
+    private func canvasContent(geo: GeometryProxy) -> some View {
+        if note.canvasNoteType == .paged {
+            PagedCanvasRepresentable(
+                drawing: $drawing,
+                pkTool: toolState.pkTool,
+                isSelectMode: toolState.isSelectMode,
+                placementTool: toolState.tool.isPlacementTool ? toolState.tool : nil,
+                onPlaceObject: { tool, point in placeObjectItem(tool, at: point) },
+                isShapeAssistEnabled: toolState.isShapeAssistEnabled,
+                backgroundStyle: CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank,
+                pageColor: note.canvasPageColor,
+                pageCount: note.resolvedPageCount,
+                isTwoPageLayout: note.isTwoPageLayout,
+                isZoomLocked: isZoomLocked,
+                objects: Array(objects),
+                autoFocusObjectID: autoFocusObjectID,
+                initialViewport: session.viewports[note.objectID],
+                onDrawingChanged: { handleDrawingChanged() },
+                onViewportChanged: { handleViewportChanged($0, viewSize: geo.size) },
+                onObjectFrameChanged: { handleObjectFrameChanged($0, frame: $1) },
+                onObjectTextChanged: { handleObjectTextChanged($0, text: $1) },
+                onObjectTodoChanged: { handleObjectTodoChanged($0, items: $1) },
+                onObjectDeleted: { handleObjectDeleted($0) },
+                onObjectAutoHeightChanged: { handleObjectAutoHeightChanged($0, height: $1) },
+                onTextSelectionChanged: { handleTextSelectionChanged($0) },
+                onLassoObjectsMoved: { region, delta in moveObjectsWithLasso(in: region, by: delta) },
+                onLassoObjectsDeleted: { region in deleteObjectsWithLasso(in: region) },
+                onNoteLinkActivated: { id in openLinkedNote(objectID: id) },
+                onObjectShapeEditRequested: { id in requestShapeEdit(id) },
+                onObjectTableChanged: { id, payload in handleObjectTableChanged(id, payload: payload) },
+                onObjectTableResized: { id, frame, payload in handleObjectTableResized(id, frame: frame, payload: payload) },
+                onToggleUserLock: { id in toggleUserLock(objectID: id) },
+                onGroupObjects: { ids in groupObjects(ids) },
+                onUngroupObjects: { ids in ungroupObjects(ids) },
+                onAppendPage: { addPage() },
+                onSelectionChanged: { handleSelectionChanged($0) },
+                onCanvasReady: { undoBridge.attach($0) },
+                scrollToPage: scrollToPage,
+                onScrollHandled: { scrollToPage = nil },
+                resetZoomRequested: resetZoomRequested,
+                onZoomResetHandled: { resetZoomRequested = false }
+            )
+        } else {
+            CanvasRepresentable(
+                drawing: $drawing,
+                pkTool: toolState.pkTool,
+                isSelectMode: toolState.isSelectMode,
+                placementTool: toolState.tool.isPlacementTool ? toolState.tool : nil,
+                onPlaceObject: { tool, point in placeObjectItem(tool, at: point) },
+                isShapeAssistEnabled: toolState.isShapeAssistEnabled,
+                backgroundStyle: CanvasBackgroundStyle(rawValue: note.backgroundStyle ?? "") ?? .blank,
+                pageColor: note.canvasPageColor,
+                noteType: note.canvasNoteType,
+                pageCount: note.resolvedPageCount,
+                isTwoPageLayout: note.isTwoPageLayout,
+                isHorizontalScroll: note.isHorizontalScroll,
+                isZoomLocked: isZoomLocked,
+                objects: Array(objects),
+                autoFocusObjectID: autoFocusObjectID,
+                initialViewport: session.viewports[note.objectID],
+                onDrawingChanged: { handleDrawingChanged() },
+                onViewportChanged: { handleViewportChanged($0, viewSize: geo.size) },
+                onObjectFrameChanged: { handleObjectFrameChanged($0, frame: $1) },
+                onObjectTextChanged: { handleObjectTextChanged($0, text: $1) },
+                onObjectTodoChanged: { handleObjectTodoChanged($0, items: $1) },
+                onObjectDeleted: { handleObjectDeleted($0) },
+                onObjectAutoHeightChanged: { handleObjectAutoHeightChanged($0, height: $1) },
+                onTextSelectionChanged: { handleTextSelectionChanged($0) },
+                onLassoObjectsMoved: { region, delta in moveObjectsWithLasso(in: region, by: delta) },
+                onLassoObjectsDeleted: { region in deleteObjectsWithLasso(in: region) },
+                onNoteLinkActivated: { id in openLinkedNote(objectID: id) },
+                onObjectShapeEditRequested: { id in requestShapeEdit(id) },
+                onObjectTableChanged: { id, payload in handleObjectTableChanged(id, payload: payload) },
+                onObjectTableResized: { id, frame, payload in handleObjectTableResized(id, frame: frame, payload: payload) },
+                onToggleUserLock: { id in toggleUserLock(objectID: id) },
+                onGroupObjects: { ids in groupObjects(ids) },
+                onUngroupObjects: { ids in ungroupObjects(ids) },
+                onAppendPage: { addPage() },
+                onSelectionChanged: { handleSelectionChanged($0) },
+                onCanvasReady: { undoBridge.attach($0) },
+                scrollToPage: scrollToPage,
+                onScrollHandled: { scrollToPage = nil },
+                resetZoomRequested: resetZoomRequested,
+                onZoomResetHandled: { resetZoomRequested = false }
+            )
+        }
+    }
+
+    // MARK: - キャンバス共有ハンドラ(両ノート形式で同一)
+
+    private func handleDrawingChanged() {
+        onActivate()          // 描いた側を分割のアクティブ側にする
+        scheduleAutoSave()
+        undoBridge.refresh()  // 描画のたびに戻る/やり直しボタンの状態を更新
+    }
+
+    private func handleViewportChanged(_ viewport: CanvasViewport, viewSize: CGSize) {
+        session.updateViewport(viewport, for: note.objectID)
+        // ズーム倍率を追跡(左上の倍率表示用)
+        if viewport.zoomScale > 0 {
+            let rounded = (viewport.zoomScale * 100).rounded()
+            let current = (currentZoomScale * 100).rounded()
+            if rounded != current { currentZoomScale = viewport.zoomScale }
+        }
+        // 通常ノートは現在ページを追跡(しおりトグル/目次追加の対象・変化時のみ更新)
+        if note.canvasNoteType == .paged, viewSize.width > 0 {
+            let page = PagePlanner.currentPage(
+                contentOffsetX: viewport.contentOffset.x, viewWidth: viewSize.width,
+                zoomScale: viewport.zoomScale,
+                layout: PagedLayoutCalculator(pageCount: note.resolvedPageCount,
+                                              isTwoPageLayout: note.isTwoPageLayout,
+                                              isHorizontalScroll: true)
+            )
+            if page != currentPageIndex { currentPageIndex = page }
+        }
+    }
+
+    private func handleObjectFrameChanged(_ id: NSManagedObjectID, frame: CGRect) {
+        withObject(id) { object in
+            let previous = object.contentFrame
+            object.contentFrame = frame
+            if previous != frame, let uuid = object.id {
+                CanvasObjectUndo.registerFrameChange(
+                    objectUUID: uuid, previousFrame: previous,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+        }
+    }
+
+    private func handleObjectTextChanged(_ id: NSManagedObjectID, text: String) {
+        withObject(id) { object in
+            let previous = object.text ?? ""
+            object.text = text
+            if previous != text, let uuid = object.id {
+                CanvasObjectUndo.registerTextChange(
+                    objectUUID: uuid, previousText: previous,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+        }
+    }
+
+    private func handleObjectTodoChanged(_ id: NSManagedObjectID, items: [TodoItem]) {
+        withObject(id) { object in
+            let previous = object.payload
+            object.todoItems = items
+            if previous != object.payload, let uuid = object.id {
+                CanvasObjectUndo.registerPayloadChange(
+                    objectUUID: uuid, previousPayload: previous,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+        }
+    }
+
+    private func handleObjectDeleted(_ id: NSManagedObjectID) {
+        withObject(id) { object in
+            if let snapshot = CanvasObjectSnapshot(object: object) {
+                CanvasObjectUndo.registerDelete(
+                    snapshot: snapshot,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+            context.delete(object)
+        }
+    }
+
+    private func handleObjectAutoHeightChanged(_ id: NSManagedObjectID, height: CGFloat) {
+        // フォント変更に伴う高さ調整は Undo を積まずに保存(フォント変更 Undo に追従)
+        withObject(id) { $0.contentFrame.size.height = height }
+    }
+
+    private func handleTextSelectionChanged(_ info: (objectID: NSManagedObjectID, fontSize: CGFloat)?) {
+        if let info {
+            toolState.selectedTextObject = SelectedTextObject(
+                objectID: info.objectID, fontSize: info.fontSize
+            )
+        } else {
+            toolState.selectedTextObject = nil
+        }
+    }
+
+    private func handleSelectionChanged(_ hasSelection: Bool) {
+        // オブジェクトの選択有無を選択モードへ反映(描画停止・単指操作の切替)
+        toolState.isSelectMode = hasSelection
     }
 
     // MARK: - ノートのレイアウト設定(見開き / 横スクロール)
@@ -670,6 +780,76 @@ struct NoteCanvasView: View {
         session.open(linked)
     }
 
+    // MARK: - 表の編集(セルテキスト / 列幅・行高)
+
+    /// セルテキスト変更の保存(payload 変更・Undo あり)。
+    private func handleObjectTableChanged(_ id: NSManagedObjectID, payload: TablePayload) {
+        withObject(id) { object in
+            let previous = object.payload
+            object.tablePayload = payload
+            if previous != object.payload, let uuid = object.id {
+                CanvasObjectUndo.registerPayloadChange(
+                    objectUUID: uuid, previousPayload: previous,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+        }
+    }
+
+    /// 列幅/行高ドラッグ確定: 新フレーム + 新 payload を 1つの Undo グループとして保存。
+    private func handleObjectTableResized(_ id: NSManagedObjectID, frame: CGRect, payload: TablePayload) {
+        withObject(id) { object in
+            let previousFrame = object.contentFrame
+            let previousPayload = object.payload
+            object.contentFrame = frame
+            object.tablePayload = payload
+            guard let uuid = object.id else { return }
+            let manager = undoBridge.activeUndoManager
+            // フレームと payload を同一 Undo グループにまとめる。
+            manager?.beginUndoGrouping()
+            if previousFrame != frame {
+                CanvasObjectUndo.registerFrameChange(
+                    objectUUID: uuid, previousFrame: previousFrame,
+                    in: manager, context: context, bridge: undoBridge
+                )
+            }
+            if previousPayload != object.payload {
+                CanvasObjectUndo.registerPayloadChange(
+                    objectUUID: uuid, previousPayload: previousPayload,
+                    in: manager, context: context, bridge: undoBridge
+                )
+            }
+            manager?.endUndoGrouping()
+        }
+    }
+
+    // MARK: - 図形の編集(線色 / 塗り / 太さ)
+
+    /// 図形のダブルタップ → 編集ポップオーバーを開く(開いた時点の payload を控える)。
+    private func requestShapeEdit(_ id: NSManagedObjectID) {
+        guard let object = (try? context.existingObject(with: id)) as? CanvasObject,
+              object.objectKind == .shape else { return }
+        editingShape = EditingShape(id: id, previousPayload: object.payload)
+    }
+
+    /// ポップオーバー操作中のリアルタイム反映(Undo は積まず、閉じるときにまとめて積む)。
+    private func updateShapePayload(_ id: NSManagedObjectID, _ payload: ShapePayload) {
+        withObject(id) { $0.shapePayload = payload }
+    }
+
+    /// ポップオーバーを閉じたとき、開いた時点からの変化を 1つの Undo として登録する。
+    private func commitShapeEdit(_ editing: EditingShape) {
+        guard let object = (try? context.existingObject(with: editing.id)) as? CanvasObject,
+              object.payload != editing.previousPayload, let uuid = object.id else { return }
+        CanvasObjectUndo.registerPayloadChange(
+            objectUUID: uuid, previousPayload: editing.previousPayload,
+            in: undoBridge.activeUndoManager,
+            context: context, bridge: undoBridge
+        )
+        persist()
+    }
+
     // MARK: - 投げ縄でのインクとオブジェクトの連動
 
     /// 投げ縄で移動したインク領域に中心があるオブジェクトを、同じ差分だけ平行移動する。
@@ -756,9 +936,19 @@ struct NoteCanvasView: View {
     /// タップ配置(テキスト/Todo): オブジェクトを同期生成し、生成した表示ビューを作るための
     /// item を返す。呼び出し側(タップハンドラ)がタッチ文脈内で placeAndFocus し編集を開始する。
     private func placeObjectItem(_ tool: CanvasTool, at point: CGPoint) -> CanvasObjectItem {
-        let request: ObjectInsertion = (tool == .todo) ? .todo : .text
+        let request: ObjectInsertion
+        switch tool {
+        case .todo: request = .todo
+        case .shape: request = .shape(toolState.pendingShapeType ?? .rectangle)
+        case .table:
+            let size = toolState.pendingTableSize ?? TableGridSize(rows: 3, cols: 3)
+            request = .table(rows: size.rows, cols: size.cols)
+        default: request = .text
+        }
         // 配置モードを解除して投げ縄(選択モード)へ戻す。
         toolState.tool = .lasso
+        toolState.pendingShapeType = nil
+        toolState.pendingTableSize = nil
         let object = insert(request, viewSize: .zero, at: point)
         // このパスでは placeAndFocus が同期的に選択・編集開始するので、render 経由の
         // autoFocus は不要(二重フォーカスを避けるためクリアする)。
@@ -774,7 +964,9 @@ struct NoteCanvasView: View {
             isUserLocked: object.isUserLocked,
             parentGroupID: object.parentGroupID,
             linkTitle: "",
-            todoItems: object.objectKind == .todo ? object.todoItems : []
+            todoItems: object.objectKind == .todo ? object.todoItems : [],
+            shapePayload: object.objectKind == .shape ? object.shapePayload : nil,
+            tablePayload: object.objectKind == .table ? object.tablePayload : nil
         )
     }
 
@@ -813,6 +1005,23 @@ struct NoteCanvasView: View {
             object.kind = CanvasObjectKind.todo.rawValue
             object.todoItems = [TodoItem(text: "", done: false)]
             object.contentFrame = CGRect(x: center.x - 130, y: center.y - 60, width: 260, height: 120)
+        case .shape(let type):
+            object.kind = CanvasObjectKind.shape.rawValue
+            // デフォルト: 黒線 / 透明塗り / 太さ 2.0、150×150pt をタップ位置中心に配置。
+            object.shapePayload = ShapePayload(
+                shapeType: type, strokeColor: "#000000FF", fillColor: "#00000000", lineWidth: 2.0
+            )
+            object.contentFrame = CGRect(x: center.x - 75, y: center.y - 75, width: 150, height: 150)
+        case .table(let rows, let cols):
+            object.kind = CanvasObjectKind.table.rawValue
+            // 列幅 100 / 行高 40 の空の表。タップ位置を中心に配置。
+            let table = TablePayload.make(rows: rows, cols: cols)
+            object.tablePayload = table
+            let size = table.totalSize
+            object.contentFrame = CGRect(
+                x: center.x - size.width / 2, y: center.y - size.height / 2,
+                width: size.width, height: size.height
+            )
         }
 
         // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる

@@ -18,6 +18,8 @@ struct CanvasObjectItem {
     var parentGroupID: UUID? = nil  // 同じ UUID を持つオブジェクト同士は同一グループ
     var linkTitle: String = ""  // noteLink: リンク先ノートのタイトル
     var todoItems: [TodoItem] = []  // todo: チェックリストの項目
+    var shapePayload: ShapePayload? = nil  // shape: 図形パラメータ
+    var tablePayload: TablePayload? = nil  // table: 表の構造
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -39,6 +41,12 @@ final class ObjectLayerUIView: UIView {
     var onSelectionChanged: ((Bool) -> Void)?
     /// ノートリンクのダブルタップでリンク先へジャンプする要求
     var onNoteLinkActivated: ((NSManagedObjectID) -> Void)?
+    /// 図形のダブルタップで編集ポップオーバーを開く要求
+    var onShapeEdit: ((NSManagedObjectID) -> Void)?
+    /// 表のセル編集・列幅/行高変更の保存(payload 変更・Undo あり)
+    var onTableChanged: ((NSManagedObjectID, TablePayload) -> Void)?
+    /// 表の列幅/行高ドラッグ確定(新フレーム + 新 payload を 1つの Undo グループで保存)
+    var onTableResized: ((NSManagedObjectID, CGRect, TablePayload) -> Void)?
     /// ユーザーロックのトグル(ロック/ロック解除)要求
     var onToggleUserLock: ((NSManagedObjectID) -> Void)?
     /// 選択中の複数オブジェクトを1グループにまとめる要求
@@ -318,6 +326,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private let imageView = UIImageView()
     private let textView = UITextView()
     private let todoListView = TodoListView()
+    private let shapeView = ShapeContentView()
+    private let tableView = TableObjectContentView()
     private let resizeHandle = UIView()
     /// ユーザーロック中に隅へ出す南京錠バッジ(タップで解除)
     private let lockBadge = UIButton(type: .system)
@@ -377,6 +387,28 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
                 self.layerView?.onAutoHeightChanged?(self.objectID, height)
             }
             addSubview(todoListView)
+        case .shape:
+            shapeView.payload = item.shapePayload
+            addSubview(shapeView)
+        case .table:
+            tableView.onCellChanged = { [weak self] payload in
+                guard let self else { return }
+                self.layerView?.onTableChanged?(self.objectID, payload)
+            }
+            // 列/行リサイズ: ドラッグ中は自分の contentFrame を追従、確定で Undo グループ保存。
+            tableView.onResizeLive = { [weak self] size in
+                guard let self else { return }
+                self.isInteracting = true
+                self.contentFrame.size = size
+                self.applyPlacement()
+            }
+            tableView.onResizeEnded = { [weak self] payload in
+                guard let self else { return }
+                self.isInteracting = false
+                self.layerView?.onTableResized?(self.objectID, self.contentFrame, payload)
+            }
+            tableView.payload = item.tablePayload
+            addSubview(tableView)
         }
 
         // 選択チップ: リサイズハンドル(右下)。角に半分かかる配置
@@ -431,6 +463,24 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // ジャンプの直前に選択状態のフリッカーが入ってしまう。
         if kind == .noteLink {
             let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleNoteLinkJump))
+            doubleTap.numberOfTapsRequired = 2
+            doubleTap.allowedTouchTypes = fingerOnly
+            addGestureRecognizer(doubleTap)
+            tap.require(toFail: doubleTap)
+        }
+
+        // 図形はダブルタップで編集ポップオーバー(線色/塗り/太さ)を開く。
+        if kind == .shape {
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleShapeEditDoubleTap))
+            doubleTap.numberOfTapsRequired = 2
+            doubleTap.allowedTouchTypes = fingerOnly
+            addGestureRecognizer(doubleTap)
+            tap.require(toFail: doubleTap)
+        }
+
+        // 表はセルのダブルタップでそのセルのテキスト編集に入る。
+        if kind == .table {
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleTableCellDoubleTap(_:)))
             doubleTap.numberOfTapsRequired = 2
             doubleTap.allowedTouchTypes = fingerOnly
             addGestureRecognizer(doubleTap)
@@ -506,6 +556,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         imageView.frame = bounds
         textView.frame = bounds
         todoListView.frame = bounds
+        shapeView.frame = bounds
+        tableView.frame = bounds
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
         lockBadge.frame = CGRect(x: bounds.width - 11, y: -11, width: 22, height: 22)  // 右上の角
 
@@ -569,6 +621,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if kind == .todo, !todoListView.isEditing {
             todoListView.setItems(item.todoItems)
         }
+        if kind == .shape {
+            shapeView.payload = item.shapePayload
+            shapeView.setNeedsDisplay()
+        }
+        if kind == .table {
+            tableView.payload = item.tablePayload
+        }
         if kind == .noteLink {
             linkTitleLabel.text = item.linkTitle.isEmpty ? "(削除されたノート)" : item.linkTitle
             linkThumb.image = item.image
@@ -625,7 +684,10 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// リサイズは「単体選択かつ非ロック」のときだけ(複数選択/グループ選択では出さない)。
     func refreshSelectionChrome() {
         let single = layerView?.selectedID == objectID
-        resizeHandle.isHidden = !isSelected || !single || isUserLocked
+        let show = isSelected && single && !isUserLocked
+        // 表は列/行の個別リサイズハンドルで調整するため、四隅の一括リサイズは出さない。
+        resizeHandle.isHidden = !show || kind == .table
+        if kind == .table { tableView.setResizeHandlesVisible(show) }
     }
 
     /// 移動・削除から保護されているか(システム/ユーザーどちらのロックでも)
@@ -652,7 +714,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     // Todo の行内コントロール(チェックボックス/テキスト欄)へのタップは、
     // 親のタップ(=再選択・編集開始)に横取りさせずコントロールへ渡す。
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard kind == .todo else { return true }
+        guard kind == .todo || kind == .table else { return true }
         var view = touch.view
         while let current = view, current !== self {
             if current is UIControl || current is UITextField { return false }
@@ -666,6 +728,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         switch kind {
         case .text: textView.textColor = pageColor.contentUIColor
         case .todo: todoListView.updatePageColor(pageColor)
+        case .table: tableView.updatePageColor(pageColor)
         default: break
         }
     }
@@ -691,6 +754,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             textView.resignFirstResponder()
         } else if kind == .todo {
             todoListView.endEditing(true)
+        } else if kind == .table {
+            tableView.endActiveEditing()
         }
     }
 
@@ -732,6 +797,20 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     @objc private func handleNoteLinkJump() {
         guard let layerView, kind == .noteLink else { return }
         layerView.onNoteLinkActivated?(objectID)
+    }
+
+    /// 図形のダブルタップ → 選択したうえで編集ポップオーバーを要求する
+    @objc private func handleShapeEditDoubleTap() {
+        guard let layerView, kind == .shape else { return }
+        if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
+        layerView.onShapeEdit?(objectID)
+    }
+
+    /// 表のダブルタップ → 選択したうえで、タップしたセルのテキスト編集に入る。
+    @objc private func handleTableCellDoubleTap(_ gesture: UITapGestureRecognizer) {
+        guard let layerView, kind == .table else { return }
+        if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
+        tableView.beginEditingCell(at: gesture.location(in: tableView))
     }
 
     @objc private func handleMovePan(_ gesture: UIPanGestureRecognizer) {
@@ -784,6 +863,11 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
                 // 高さは行数(内容)で決まるので幅だけ変える
                 newWidth = max(160, newWidth)
                 newHeight = contentFrame.height
+            } else if kind == .shape || kind == .table {
+                // 図形は縦横を自由にリサイズ(アスペクト固定しない)。
+                // 表は選択中に列/行ハンドルで個別調整するため通常は四隅ハンドルを出さない(下記 refreshSelectionChrome)。
+                newWidth = max(20, newWidth)
+                newHeight = max(20, newHeight)
             } else {
                 // 画像 / PDF はアスペクト比を維持
                 let ratio = gestureStartFrame.height / max(gestureStartFrame.width, 1)
@@ -860,6 +944,291 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             else { layerView.onDelete?(self.objectID) }
         })
         return UIMenu(children: actions)
+    }
+}
+
+// MARK: - 図形(矩形・楕円・三角・直線・矢印・星)
+
+/// 図形を UIBezierPath で描画するコンテンツビュー。移動・リサイズ・選択・編集ジェスチャは
+/// 親 CanvasObjectUIView が持つため、このビュー自身はタッチを受けない(描画専用)。
+final class ShapeContentView: UIView {
+    var payload: ShapePayload?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+        contentMode = .redraw  // リサイズで再描画されるように
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func draw(_ rect: CGRect) {
+        guard let payload else { return }
+        let lw = max(0.5, payload.lineWidth)
+        let inset = bounds.insetBy(dx: lw / 2, dy: lw / 2)
+        guard inset.width > 0, inset.height > 0 else { return }
+
+        let path = payload.shapeType.path(in: inset)
+        path.lineWidth = lw
+        path.lineJoinStyle = .round
+        path.lineCapStyle = .round
+
+        if payload.shapeType.isFillable,
+           let fill = UIColor(hex: payload.fillColor), fill.cgColor.alpha > 0 {
+            fill.setFill()
+            path.fill()
+        }
+        if let stroke = UIColor(hex: payload.strokeColor) {
+            stroke.setStroke()
+            path.stroke()
+        }
+    }
+}
+
+// MARK: - 表(Excel風・可変列幅/行高)
+
+/// 表をグリッド描画し、各セルに透明な UITextField を重ねる。列/行境界のハンドルで
+/// 個別に幅・高さを変更できる(Excel仕様)。フレーム/選択/移動は親 CanvasObjectUIView が持つ。
+final class TableObjectContentView: UIView, UITextFieldDelegate {
+    var payload: TablePayload? { didSet { rebuild() } }
+    /// セルテキスト変更の保存(payload を渡す)
+    var onCellChanged: ((TablePayload) -> Void)?
+    /// 列/行リサイズ中: 表全体の新サイズを親へ伝える(親が contentFrame を更新)
+    var onResizeLive: ((CGSize) -> Void)?
+    /// 列/行リサイズ確定: 最終 payload を親へ伝える(親が Undo グループで保存)
+    var onResizeEnded: ((TablePayload) -> Void)?
+
+    private var cellFields: [[UITextField]] = []
+    private var columnHandles: [UIView] = []
+    private var rowHandles: [UIView] = []
+    private var handlesVisible = false
+    private var textColor: UIColor = .label
+    private var resizeStartWidths: [CGFloat] = []
+    private var resizeStartHeights: [CGFloat] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        contentMode = .redraw
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // MARK: 構築・反映
+
+    private func rebuild() {
+        guard let payload else { return }
+        let structureChanged = cellFields.count != payload.rowCount
+            || (cellFields.first?.count ?? 0) != payload.columnCount
+        if structureChanged {
+            cellFields.flatMap { $0 }.forEach { $0.removeFromSuperview() }
+            cellFields = (0..<payload.rowCount).map { _ in
+                (0..<payload.columnCount).map { _ -> UITextField in
+                    let tf = UITextField()
+                    tf.font = .systemFont(ofSize: 14)
+                    tf.borderStyle = .none
+                    tf.backgroundColor = .clear
+                    tf.textColor = textColor
+                    tf.textAlignment = .center
+                    tf.autocorrectionType = .no
+                    tf.isUserInteractionEnabled = false  // 編集開始(ダブルタップ)まで親がタッチを受ける
+                    tf.delegate = self
+                    tf.addTarget(self, action: #selector(cellEditingChanged), for: .editingChanged)
+                    addSubview(tf)
+                    return tf
+                }
+            }
+            rebuildHandles()
+        }
+        for r in 0..<payload.rowCount {
+            for c in 0..<payload.columnCount {
+                let tf = cellFields[r][c]
+                let text = payload.text(row: r, col: c)
+                if !tf.isFirstResponder, tf.text != text { tf.text = text }
+            }
+        }
+        setNeedsLayout()
+        setNeedsDisplay()
+    }
+
+    private func rebuildHandles() {
+        (columnHandles + rowHandles).forEach { $0.removeFromSuperview() }
+        columnHandles = []
+        rowHandles = []
+        guard let payload else { return }
+        for i in 0..<payload.columnCount {
+            let h = makeHandle(vertical: true)
+            h.tag = i
+            h.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handleColumnPan(_:))))
+            addSubview(h)
+            columnHandles.append(h)
+        }
+        for i in 0..<payload.rowCount {
+            let h = makeHandle(vertical: false)
+            h.tag = i
+            h.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handleRowPan(_:))))
+            addSubview(h)
+            rowHandles.append(h)
+        }
+        setResizeHandlesVisible(handlesVisible)
+    }
+
+    private func makeHandle(vertical: Bool) -> UIView {
+        let v = UIView()
+        v.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.6)
+        v.layer.cornerRadius = 3
+        v.isHidden = true
+        return v
+    }
+
+    func setResizeHandlesVisible(_ visible: Bool) {
+        handlesVisible = visible
+        (columnHandles + rowHandles).forEach { $0.isHidden = !visible }
+        if visible { (columnHandles + rowHandles).forEach { bringSubviewToFront($0) } }
+    }
+
+    func updatePageColor(_ pageColor: CanvasPageColor) {
+        textColor = pageColor.contentUIColor
+        cellFields.flatMap { $0 }.forEach { $0.textColor = textColor }
+    }
+
+    // MARK: レイアウト・描画
+
+    /// 列/行の境界座標(0..n)。合計が bounds に一致しない場合はスケールして合わせる。
+    private func edges(_ sizes: [CGFloat], total: CGFloat) -> [CGFloat] {
+        let sum = sizes.reduce(0, +)
+        let scale = sum > 0 ? total / sum : 1
+        var acc: [CGFloat] = [0]
+        var running: CGFloat = 0
+        for s in sizes { running += s * scale; acc.append(running) }
+        return acc
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let payload, !cellFields.isEmpty else { return }
+        let xs = edges(payload.columnWidths, total: bounds.width)
+        let ys = edges(payload.rowHeights, total: bounds.height)
+        for r in 0..<min(payload.rowCount, cellFields.count) {
+            for c in 0..<min(payload.columnCount, cellFields[r].count) {
+                cellFields[r][c].frame = CGRect(
+                    x: xs[c] + 4, y: ys[r],
+                    width: max(0, (xs[c + 1] - xs[c]) - 8), height: max(0, ys[r + 1] - ys[r])
+                )
+            }
+        }
+        for (i, h) in columnHandles.enumerated() where i + 1 < xs.count {
+            h.frame = CGRect(x: xs[i + 1] - 4, y: 0, width: 8, height: 20)
+        }
+        for (i, h) in rowHandles.enumerated() where i + 1 < ys.count {
+            h.frame = CGRect(x: 0, y: ys[i + 1] - 4, width: 20, height: 8)
+        }
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let payload else { return }
+        let xs = edges(payload.columnWidths, total: bounds.width)
+        let ys = edges(payload.rowHeights, total: bounds.height)
+        UIColor.separator.setStroke()
+        let inner = UIBezierPath()
+        for x in xs.dropFirst().dropLast() {
+            inner.move(to: CGPoint(x: x, y: 0)); inner.addLine(to: CGPoint(x: x, y: bounds.height))
+        }
+        for y in ys.dropFirst().dropLast() {
+            inner.move(to: CGPoint(x: 0, y: y)); inner.addLine(to: CGPoint(x: bounds.width, y: y))
+        }
+        inner.lineWidth = 0.5
+        inner.stroke()
+        let border = UIBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+        border.lineWidth = 1
+        border.stroke()
+    }
+
+    // MARK: セル編集
+
+    /// 指定座標(このビュー座標)のセルを編集開始する。
+    func beginEditingCell(at point: CGPoint) {
+        guard let payload else { return }
+        let xs = edges(payload.columnWidths, total: bounds.width)
+        let ys = edges(payload.rowHeights, total: bounds.height)
+        guard let col = (0..<payload.columnCount).first(where: { point.x >= xs[$0] && point.x < xs[$0 + 1] }),
+              let row = (0..<payload.rowCount).first(where: { point.y >= ys[$0] && point.y < ys[$0 + 1] }),
+              row < cellFields.count, col < cellFields[row].count else { return }
+        let tf = cellFields[row][col]
+        tf.isUserInteractionEnabled = true
+        tf.becomeFirstResponder()
+    }
+
+    @objc private func cellEditingChanged() { /* ライブ反映は終了時にまとめて保存 */ }
+
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        textField.isUserInteractionEnabled = false
+        writeBackCells()
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        textField.resignFirstResponder()
+        return true
+    }
+
+    private func writeBackCells() {
+        guard var updated = payload else { return }
+        var cells: [TableCell] = []
+        for r in 0..<min(updated.rowCount, cellFields.count) {
+            for c in 0..<min(updated.columnCount, cellFields[r].count) {
+                let t = cellFields[r][c].text ?? ""
+                if !t.isEmpty { cells.append(TableCell(row: r, col: c, text: t)) }
+            }
+        }
+        guard cells != updated.cells else { return }
+        updated.cells = cells
+        onCellChanged?(updated)
+    }
+
+    /// 外部(親)から編集を終了させる(選択解除時など)。
+    func endActiveEditing() {
+        endEditing(true)
+    }
+
+    // MARK: 列/行リサイズ
+
+    @objc private func handleColumnPan(_ gesture: UIPanGestureRecognizer) {
+        guard let index = gesture.view?.tag, var p = payload, index < p.columnWidths.count else { return }
+        switch gesture.state {
+        case .began:
+            resizeStartWidths = p.columnWidths
+        case .changed:
+            let dx = gesture.translation(in: self).x
+            let start = index < resizeStartWidths.count ? resizeStartWidths[index] : p.columnWidths[index]
+            p.columnWidths[index] = max(40, start + dx)
+            payload = p
+            onResizeLive?(p.totalSize)
+        case .ended, .cancelled, .failed:
+            onResizeEnded?(p)
+        default:
+            break
+        }
+    }
+
+    @objc private func handleRowPan(_ gesture: UIPanGestureRecognizer) {
+        guard let index = gesture.view?.tag, var p = payload, index < p.rowHeights.count else { return }
+        switch gesture.state {
+        case .began:
+            resizeStartHeights = p.rowHeights
+        case .changed:
+            let dy = gesture.translation(in: self).y
+            let start = index < resizeStartHeights.count ? resizeStartHeights[index] : p.rowHeights[index]
+            p.rowHeights[index] = max(24, start + dy)
+            payload = p
+            onResizeLive?(p.totalSize)
+        case .ended, .cancelled, .failed:
+            onResizeEnded?(p)
+        default:
+            break
+        }
     }
 }
 

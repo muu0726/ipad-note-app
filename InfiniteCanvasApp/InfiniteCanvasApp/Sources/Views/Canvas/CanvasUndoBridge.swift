@@ -16,9 +16,18 @@ final class CanvasUndoBridge: ObservableObject {
     /// 現在のキャンバスの描画(ページ削除・Undo でストロークを差し替えるのに使う)
     var currentDrawing: PKDrawing? { canvasView?.drawing }
 
+    /// merged 描画の差し替え先の上書き(通常ノート用)。通常ノートはキャンバスがページ分割
+    /// されているため、merged をキャンバスへ直接書けない。設定時は canvasView への書き込みの
+    /// 代わりにこれを呼ぶ(NoteCanvasView が @State drawing へ書き戻し、配布経路へ流す)。
+    var onReplaceDrawing: ((PKDrawing) -> Void)?
+
     /// 描画を差し替える。canvasViewDrawingDidChange 経由で @State と保存へ伝播する。
     func replaceDrawing(_ drawing: PKDrawing) {
-        canvasView?.drawing = drawing
+        if let onReplaceDrawing {
+            onReplaceDrawing(drawing)
+        } else {
+            canvasView?.drawing = drawing
+        }
         refresh()
     }
 

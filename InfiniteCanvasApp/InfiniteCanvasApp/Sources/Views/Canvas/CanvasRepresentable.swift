@@ -134,6 +134,12 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onLassoObjectsDeleted: (CGRect) -> Void
     /// ノートリンクのダブルタップでリンク先ノートを開く要求
     let onNoteLinkActivated: (NSManagedObjectID) -> Void
+    /// 図形のダブルタップで編集ポップオーバーを開く要求
+    let onObjectShapeEditRequested: (NSManagedObjectID) -> Void
+    /// 表のセル編集の保存(payload 変更・Undo あり)
+    let onObjectTableChanged: (NSManagedObjectID, TablePayload) -> Void
+    /// 表の列幅/行高ドラッグ確定(新フレーム + 新 payload を 1つの Undo グループで保存)
+    let onObjectTableResized: (NSManagedObjectID, CGRect, TablePayload) -> Void
     /// オブジェクトのユーザーロックをトグルする要求
     let onToggleUserLock: (NSManagedObjectID) -> Void
     /// 選択中の複数オブジェクトをグループ化する要求
@@ -184,6 +190,11 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.patternView.frame = CGRect(origin: .zero, size: size)
         container.objectLayer.frame = CGRect(origin: .zero, size: size)
 
+        // オブジェクト層のクリップ: 10万pt四方の無限キャンバス層で masksToBounds を有効にすると、
+        // ズーム時の実効ピクセルが GPU のレンダバッファ上限を超えて層ごと描画が黙って失敗し、
+        // オブジェクトが全て見えなくなる。無限はクリップ不要(層=キャンバス全域)なので無効化する。
+        container.objectLayer.clipsToBounds = (noteType == .paged)
+
         // スクロール方向: 横スクロール時のみ横バウンス、縦スクロール時は縦バウンス。
         // ページスナップは isPagingEnabled ではなく scrollViewWillEndDragging で
         // カスタム実装する(isPagingEnabled は bounds.width 単位でスナップするが、
@@ -226,6 +237,52 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.patternView.configure(
             noteType: noteType, layout: layout,
             style: backgroundStyle, pageColor: pageColor
+        )
+
+        applyInfiniteScrollLimit(to: container)
+    }
+
+    /// 無限キャンバスのコンテンツ外接矩形(描画+オブジェクト)。コンテンツが無ければ nil。
+    private var infiniteContentUnion: CGRect? {
+        var union = CGRect.null
+        let drawingBounds = drawing.bounds
+        if !drawingBounds.isNull, !drawingBounds.isEmpty {
+            union = union.union(drawingBounds)
+        }
+        for object in objects where !object.isDeleted && object.managedObjectContext != nil {
+            union = union.union(object.contentFrame)
+        }
+        return union.isNull ? nil : union
+    }
+
+    /// 無限キャンバスのスクロール範囲を「コンテンツ+余白1画面分」へ制限する(Freeform 風)。
+    /// 描画・オブジェクトの変化(applyLayout 経由)、ズーム、bounds 変化のたびに呼び直す。
+    fileprivate func applyInfiniteScrollLimit(to container: CanvasContainerUIView) {
+        guard noteType == .infinite else { return }
+        let canvas = container.canvasView
+        guard canvas.bounds.width > 0, canvas.bounds.height > 0 else { return }
+        let allowed = InfiniteScrollLimiter.allowedRect(
+            contentUnion: infiniteContentUnion,
+            viewportSize: canvas.bounds.size,
+            zoomScale: canvas.zoomScale,
+            canvasSize: Self.canvasSize
+        )
+        canvas.contentInset = InfiniteScrollLimiter.insets(
+            allowedRect: allowed, zoomScale: canvas.zoomScale, canvasSize: Self.canvasSize
+        )
+    }
+
+    /// 現在の許可範囲で contentOffset をクランプする(復元・リセット等のプログラム設定用)
+    fileprivate func clampedInfiniteOffset(_ offset: CGPoint, for canvas: UIScrollView) -> CGPoint {
+        let allowed = InfiniteScrollLimiter.allowedRect(
+            contentUnion: infiniteContentUnion,
+            viewportSize: canvas.bounds.size,
+            zoomScale: canvas.zoomScale,
+            canvasSize: Self.canvasSize
+        )
+        return InfiniteScrollLimiter.clampedOffset(
+            offset, allowedRect: allowed,
+            zoomScale: canvas.zoomScale, viewportSize: canvas.bounds.size
         )
     }
 
@@ -270,6 +327,15 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.objectLayer.onNoteLinkActivated = { [weak coordinator] id in
             coordinator?.parent.onNoteLinkActivated(id)
         }
+        container.objectLayer.onShapeEdit = { [weak coordinator] id in
+            coordinator?.parent.onObjectShapeEditRequested(id)
+        }
+        container.objectLayer.onTableChanged = { [weak coordinator] id, payload in
+            coordinator?.parent.onObjectTableChanged(id, payload)
+        }
+        container.objectLayer.onTableResized = { [weak coordinator] id, frame, payload in
+            coordinator?.parent.onObjectTableResized(id, frame, payload)
+        }
         container.objectLayer.onToggleUserLock = { [weak coordinator] id in
             coordinator?.parent.onToggleUserLock(id)
         }
@@ -308,6 +374,11 @@ struct CanvasRepresentable: UIViewRepresentable {
                 )
             }
             if noteType == .paged { centerPagedContent(canvas) }
+            if noteType == .infinite {
+                // bounds 確定後にスクロール制限を計算し直し、復元位置も範囲内へ収める
+                applyInfiniteScrollLimit(to: container)
+                canvas.contentOffset = clampedInfiniteOffset(canvas.contentOffset, for: canvas)
+            }
             // 復元したズームをスナップ閾値・背景タイル解像度へ反映
             container.objectLayer.applyZoom(canvas.zoomScale)
             container.patternView.applyZoom(canvas.zoomScale)
@@ -463,9 +534,15 @@ struct CanvasRepresentable: UIViewRepresentable {
                         canvas.contentOffset = CGPoint(x: offsetX, y: -PageMetrics.margin)
                     } else {
                         let size = Self.canvasSize
-                        canvas.contentOffset = CGPoint(
-                            x: (size - canvas.bounds.width) / 2,
-                            y: (size - canvas.bounds.height) / 2
+                        // スクロール制限を新ズームで計算し直し、中央がコンテンツから遠い場合は
+                        // 許可範囲(コンテンツ+余白)内へクランプする
+                        self.applyInfiniteScrollLimit(to: container)
+                        canvas.contentOffset = self.clampedInfiniteOffset(
+                            CGPoint(
+                                x: (size - canvas.bounds.width) / 2,
+                                y: (size - canvas.bounds.height) / 2
+                            ),
+                            for: canvas
                         )
                     }
                 }
@@ -529,9 +606,13 @@ struct CanvasRepresentable: UIViewRepresentable {
         /// 横断方向センタリング(contentInset)を現在のズームに合わせて再計算する。
         /// (再フィットはせず、scrollViewDidZoom と同じ軽量な再センタリングのみ行う)
         private func handleBoundsChange() {
-            guard parent.noteType == .paged, let canvas = container?.canvasView,
-                  let inset = parent.pagedContentInset(for: canvas) else { return }
-            canvas.contentInset = inset
+            guard let container else { return }
+            if parent.noteType == .infinite {
+                parent.applyInfiniteScrollLimit(to: container)
+                return
+            }
+            guard let inset = parent.pagedContentInset(for: container.canvasView) else { return }
+            container.canvasView.contentInset = inset
         }
 
         // MARK: - スクロール/ズーム(UIScrollViewDelegate 経由。KVO は使わない)
@@ -621,6 +702,10 @@ struct CanvasRepresentable: UIViewRepresentable {
             if parent.noteType == .paged, let canvas = container?.canvasView,
                let inset = parent.pagedContentInset(for: canvas) {
                 canvas.contentInset = inset
+            }
+            // 無限キャンバスはズームでスクロール制限(余白1画面分)を計算し直す
+            if parent.noteType == .infinite, let container {
+                parent.applyInfiniteScrollLimit(to: container)
             }
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
@@ -736,7 +821,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         // アイコンはリンク先の中身の有無に関わらず固定(ドキュメントアイコン)にするため、
                         // サムネイルは渡さない(image は nil のまま)。
                         linkTitle = object.resolvedLinkedNote?.displayTitle ?? ""
-                    } else if object.objectKind != .text && object.objectKind != .todo {
+                    } else if object.objectKind != .text && object.objectKind != .todo
+                                && object.objectKind != .shape && object.objectKind != .table {
                         if let cached = imageCache[object.objectID] {
                             image = cached
                         } else if let rendered = object.makeDisplayImage() {
@@ -755,7 +841,9 @@ struct CanvasRepresentable: UIViewRepresentable {
                         isUserLocked: object.isUserLocked,
                         parentGroupID: object.parentGroupID,
                         linkTitle: linkTitle,
-                        todoItems: object.objectKind == .todo ? object.todoItems : []
+                        todoItems: object.objectKind == .todo ? object.todoItems : [],
+                        shapePayload: object.objectKind == .shape ? object.shapePayload : nil,
+                        tablePayload: object.objectKind == .table ? object.tablePayload : nil
                     )
                 }
             layer.sync(items: items)
@@ -869,6 +957,9 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
         canvasView.contentSize = CGSize(width: canvasSize, height: canvasSize)
+        // contentInset はアプリ側で管理する(paged のセンタリング / infinite のスクロール制限)。
+        // セーフエリアによる自動加算が混ざると負の inset の計算が狂うため無効化する。
+        canvasView.contentInsetAdjustmentBehavior = .never
         canvasView.minimumZoomScale = 0.1
         canvasView.maximumZoomScale = 5.0
         canvasView.bouncesZoom = true
@@ -1024,11 +1115,24 @@ final class BackgroundPatternUIView: UIView {
     /// paged 用のページビュー(1枚 = 1ページ)
     private var pageViews: [UIView] = []
 
-    /// 無限キャンバスのグリッド表示帯: 2=通常, 1=広間隔・薄, 0=非表示。
-    private func zoomBand(_ zoom: CGFloat) -> Int {
+    /// 無限キャンバスのグリッド表示帯: 2=通常, 1=広間隔, 0=非表示。
+    /// 純ロジック(ユニットテスト対象)。
+    static func zoomBand(_ zoom: CGFloat) -> Int {
         if zoom >= 0.5 { return 2 }
         if zoom >= 0.15 { return 1 }
         return 0
+    }
+
+    /// 無限キャンバスのズーム帯ごとのタイル間隔(コンテンツ空間)。nil はパターン非表示。
+    /// 間隔はコンテンツ空間で固定し、画面上はズームに線形比例させる(Freeform 準拠)。
+    /// 縮小時(帯1)は間隔を倍にして密になりすぎるのを防ぎ、極小ズーム(帯0)では描かない。
+    /// 純ロジック(ユニットテスト対象)。
+    static func tileSpacing(forBand band: Int, base: CGFloat) -> CGFloat? {
+        switch band {
+        case 2: return base
+        case 1: return base * 2
+        default: return nil
+        }
     }
 
     override init(frame: CGRect) {
@@ -1055,24 +1159,17 @@ final class BackgroundPatternUIView: UIView {
         rebuild()
     }
 
-    /// 直近でタイルを焼いたズーム倍率(無限キャンバスの連動スケール判定用)
-    private var lastTileZoom: CGFloat = 1.0
-
-    /// ズーム時に呼ばれ、解像度と(無限キャンバスは)ドット間隔/サイズをズームへ連動させて焼き直す。
+    /// ズーム時に呼ばれ、タイルのレンダリング解像度と表示帯(密度レベル)を更新して焼き直す。
+    /// タイル間隔はコンテンツ空間で固定(Freeform 準拠)。画面上の見かけの拡縮は
+    /// スクロールビューのズーム合成が担うため、ここでは間隔を動かさない。
     func applyZoom(_ zoom: CGFloat) {
-        // 無限キャンバスは間隔・ドット径・線幅を currentZoom に連動させるため、ズームが一定割合
-        // 変化したら焼き直す(帯跨ぎも含む。過剰再生成を避けるため 10% 閾値)。
-        let zoomChanged = noteType == .infinite
-            && (abs(zoom - lastTileZoom) / max(lastTileZoom, 0.01) > 0.1
-                || zoomBand(zoom) != zoomBand(currentZoom))
+        let bandChanged = noteType == .infinite
+            && Self.zoomBand(zoom) != Self.zoomBand(currentZoom)
         currentZoom = zoom
         let target = min(max(UIScreen.main.scale * zoom, UIScreen.main.scale), 12)
         let scaleChanged = abs(target - tileScale) > 0.5
         if scaleChanged { tileScale = target }
-        if scaleChanged || zoomChanged {
-            lastTileZoom = zoom
-            rebuild()
-        }
+        if scaleChanged || bandChanged { rebuild() }
     }
 
     private func rebuild() {
@@ -1119,23 +1216,22 @@ final class BackgroundPatternUIView: UIView {
     }
 
     /// 1マス分のタイル画像。タイルには用紙色の下地も含めるので、これ一枚で全面を塗れる。
-    /// 無限キャンバス(フリーボード仕様)は、間隔・ドット径・線幅を現在ズーム(currentZoom)へ
-    /// 連動させて拡大縮小する。50%以上=基本40pt、15〜50%=80pt、15%未満=非表示(背景色のみ)。
+    /// 間隔・ドット径・線幅はコンテンツ空間で固定し、画面上の拡縮はスクロールビューの
+    /// ズーム合成に任せる(Freeform 仕様)。無限キャンバスはズーム帯で密度だけ切り替える:
+    /// 50%以上=40pt、15〜50%=80pt、15%未満=非表示(背景色のみ)。
     private func makeTile() -> UIImage {
         let base = Self.spacing  // = PageMetrics.width / 20 (=40)
-        let dynamic = (noteType == .infinite)
         var spacing = base
         var draw = true
-        if dynamic {
-            switch zoomBand(currentZoom) {
-            case 2: spacing = base * currentZoom
-            case 1: spacing = base * 2 * currentZoom
-            default: spacing = base * currentZoom; draw = false  // 極小は非表示
+        if noteType == .infinite {
+            if let bandSpacing = Self.tileSpacing(forBand: Self.zoomBand(currentZoom), base: base) {
+                spacing = bandSpacing
+            } else {
+                draw = false  // 極小ズームは背景色のみ
             }
         }
-        spacing = max(2, spacing)  // 0 サイズタイルを避ける
-        let dotSize = dynamic ? max(1.5, 3.0 * currentZoom) : 3.0
-        let lineWidth = dynamic ? max(0.5, 0.5 * currentZoom) : 0.5
+        let dotSize: CGFloat = 3.0
+        let lineWidth: CGFloat = 0.5
 
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = tileScale

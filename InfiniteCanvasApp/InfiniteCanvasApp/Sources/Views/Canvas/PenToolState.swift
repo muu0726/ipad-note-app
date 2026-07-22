@@ -3,11 +3,30 @@ import PencilKit
 import Combine
 import CoreData
 
-enum CanvasTool: String, CaseIterable {
+enum CanvasTool: String, CaseIterable, Codable {
     case lasso, pen, marker, eraser, text, todo
+    case shape  // タップ位置へ図形を配置するモード(配置後 lasso へ自動復帰)
+    case table  // タップ位置へ表を配置するモード(配置後 lasso へ自動復帰)
 
     /// 描画(手書き)ではなく、タップ位置へのオブジェクト配置モードのツールか。
-    var isPlacementTool: Bool { self == .text || self == .todo }
+    var isPlacementTool: Bool {
+        self == .text || self == .todo || self == .shape || self == .table
+    }
+}
+
+/// 表配置モードで保持する行数・列数(グリッドピッカーの確定値)。
+struct TableGridSize: Equatable {
+    var rows: Int
+    var cols: Int
+}
+
+/// ツールバーに並べるお気に入りペン(ペン/マーカーの太さ・色の組み合わせ)。
+/// UserDefaults に JSON で永続化する(要件: カスタムペンホルダー)。
+struct CustomPen: Identifiable, Codable, Equatable {
+    var id: UUID
+    var toolType: CanvasTool  // .pen または .marker
+    var color: String          // Hex カラーコード(例: "#FF0000FF")
+    var width: CGFloat
 }
 
 /// 選択中のテキストオブジェクト情報(ツールバーのフォントサイズ UI 用)
@@ -94,6 +113,20 @@ final class PenToolState: ObservableObject {
     /// これが非nilかつ選択モードのときツールバーにフォントサイズ変更UIを出す。
     @Published var selectedTextObject: SelectedTextObject?
 
+    /// お気に入りペン一覧(ツールバーに動的表示)。変更のたび UserDefaults へ永続化する。
+    @Published var favoritePens: [CustomPen] {
+        didSet { PenToolState.saveFavorites(favoritePens) }
+    }
+
+    /// 現在アクティブなお気に入りペンの ID(青枠ハイライト用)。
+    @Published var activePenID: UUID?
+
+    /// 図形配置モード中に保持する図形種別(＋メニューで選択 → タップ位置に配置)。
+    @Published var pendingShapeType: ShapeType?
+
+    /// 表配置モード中に保持する行数・列数(グリッドピッカーで選択 → タップ位置に配置)。
+    @Published var pendingTableSize: TableGridSize?
+
     /// オブジェクトの選択・移動モードかどうか。
     /// 専用の「選択ツール」は廃止し、指でオブジェクトをタップして選択している間だけ true になる
     /// (真実のソースはオブジェクトレイヤーの選択状態。選択/解除のたびに書き戻される)。
@@ -102,6 +135,53 @@ final class PenToolState: ObservableObject {
 
     /// フォントサイズの調整範囲(pt)
     static let fontSizeRange: ClosedRange<CGFloat> = 12...72
+
+    init() {
+        let pens = PenToolState.loadFavorites()
+        favoritePens = pens
+        activePenID = nil
+    }
+
+    // MARK: - お気に入りペンの永続化・適用
+
+    private static let favoritesKey = "favoritePens"
+
+    /// プリセット3本: 黒細ペン 3pt / 赤中ペン 5pt / 黄太マーカー 14pt。
+    static func defaultFavorites() -> [CustomPen] {
+        [
+            CustomPen(id: UUID(), toolType: .pen, color: "#000000FF", width: 3),
+            CustomPen(id: UUID(), toolType: .pen, color: "#FF0000FF", width: 5),
+            CustomPen(id: UUID(), toolType: .marker, color: "#FFCC00FF", width: 14),
+        ]
+    }
+
+    /// UserDefaults から読み込む。無ければプリセット。UIテスト(RESET_STORE)は毎回プリセットへ。
+    static func loadFavorites() -> [CustomPen] {
+        if PersistenceController.shouldResetStore {
+            UserDefaults.standard.removeObject(forKey: favoritesKey)
+            return defaultFavorites()
+        }
+        if let data = UserDefaults.standard.data(forKey: favoritesKey),
+           let pens = try? JSONDecoder().decode([CustomPen].self, from: data), !pens.isEmpty {
+            return pens
+        }
+        return defaultFavorites()
+    }
+
+    static func saveFavorites(_ pens: [CustomPen]) {
+        guard let data = try? JSONEncoder().encode(pens) else { return }
+        UserDefaults.standard.set(data, forKey: favoritesKey)
+    }
+
+    /// お気に入りペンを選択し、その種別・色・太さを現在のツール状態へ反映する。
+    func activatePen(_ pen: CustomPen) {
+        activePenID = pen.id
+        tool = pen.toolType
+        isSelectMode = false
+        let color = UIColor(hex: pen.color) ?? .black
+        if pen.toolType == .marker { markerColor = color } else { penColor = color }
+        widths[pen.toolType] = pen.width
+    }
 
     var currentWidth: CGFloat {
         get { widths[tool] ?? 3 }
@@ -114,13 +194,13 @@ final class PenToolState: ObservableObject {
         case .pen: 0.5...20
         case .marker: 2...40
         case .eraser: 4...80
-        case .lasso, .text, .todo: 1...1  // 未使用(太さ UI を無効化)
+        case .lasso, .text, .todo, .shape, .table: 1...1  // 未使用(太さ UI を無効化)
         }
     }
 
     var currentColor: UIColor {
         switch tool {
-        case .pen, .eraser, .lasso, .text, .todo: penColor
+        case .pen, .eraser, .lasso, .text, .todo, .shape, .table: penColor
         case .marker: markerColor
         }
     }
@@ -134,7 +214,7 @@ final class PenToolState: ObservableObject {
         switch tool {
         case .pen: penColor = color
         case .marker: markerColor = color
-        case .eraser, .lasso, .text, .todo: break
+        case .eraser, .lasso, .text, .todo, .shape, .table: break
         }
     }
 
@@ -152,7 +232,7 @@ final class PenToolState: ObservableObject {
         case .lasso:
             // 手書きストロークを囲って選択 → ドラッグ移動、タップでカット/コピー/削除メニュー
             return PKLassoTool()
-        case .text, .todo:
+        case .text, .todo, .shape, .table:
             // タップ配置モード。手書きジェスチャは無効化するため実質未使用(無害な投げ縄を返す)
             return PKLassoTool()
         }
