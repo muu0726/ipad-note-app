@@ -138,12 +138,14 @@ GROUP_3_TARGETS=(
   "InfiniteCanvasAppUITests/TodoUITests"
 )
 
-# 4. 通常ノート（Paged） UI テスト (疑似ページレイアウトと削除連動)
-GROUP_4_DESC="[Group 4: 通常ノート UI テスト] ページ制レイアウト (A4縦並び表示、ページ追加・削除とオブジェクトの一括削除連動、描画境界制御)"
+# 4. 通常ノート（Paged） UI テスト (疑似ページレイアウトと削除連動・完全独立表示モード)
+GROUP_4_DESC="[Group 4: 通常ノート UI テスト] ページ制レイアウト (A4縦並び表示、ページ追加・削除とオブジェクトの一括削除連動、描画境界制御、隣のページを隠す/完全独立表示モード)"
 GROUP_4_TARGETS=(
   "InfiniteCanvasAppUITests/PagedNoteUITests"
   "InfiniteCanvasAppUITests/PagedLayoutUITests"
   "InfiniteCanvasAppUITests/PagedDrawingBoundsUITests"
+  "InfiniteCanvasAppUITests/HideAdjacentPagesUITests"
+  "InfiniteCanvasAppUITests/PagedScrollDirectionUITests"
 )
 
 # 5. 履歴管理とアンドゥ UI テスト

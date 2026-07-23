@@ -25,6 +25,8 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
     let pageCount: Int
     /// 見開き2ページ表示か
     let isTwoPageLayout: Bool
+    /// 横スクロール(ページめくり)か。false のとき GoodNotes 型の縦連続スクロール。
+    let isHorizontalScroll: Bool
     /// ズームロック: true のときピンチズームを禁止する(min/max を現在値に固定)
     let isZoomLocked: Bool
     /// 「隣のページを隠す(完全独立表示モード)」。ON でスクロール停止時にアクティブページ以外を遮蔽する。
@@ -64,12 +66,12 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
     let resetZoomRequested: Bool
     let onZoomResetHandled: () -> Void
 
-    /// 通常ノートは横スクロール(ページめくり)固定
+    /// スクロール方向はノート設定に従う(横=ページめくり / 縦=連続スクロール)
     private var layout: PagedLayoutCalculator {
         PagedLayoutCalculator(
             pageCount: pageCount,
             isTwoPageLayout: isTwoPageLayout,
-            isHorizontalScroll: true
+            isHorizontalScroll: isHorizontalScroll
         )
     }
 
@@ -79,6 +81,7 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
         coordinator.container = container
         coordinator.lastPageCount = pageCount
         coordinator.lastIsTwoPage = isTwoPageLayout
+        coordinator.lastIsHorizontal = isHorizontalScroll
 
         container.layout = layout
         container.setPageCount(pageCount)
@@ -176,9 +179,12 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
         container.isZoomLocked = isZoomLocked
         container.hideAdjacentPages = hideAdjacentPages
 
+        // 見開きトグルまたはスクロール方向の切替でページ矩形が動く(=幾何変化)
         let layoutModeChanged = isTwoPageLayout != coordinator.lastIsTwoPage
+            || isHorizontalScroll != coordinator.lastIsHorizontal
         let pageAppended = pageCount > coordinator.lastPageCount
         coordinator.lastIsTwoPage = isTwoPageLayout
+        coordinator.lastIsHorizontal = isHorizontalScroll
         coordinator.lastPageCount = pageCount
 
         if container.layout != layout {
@@ -251,6 +257,8 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
         var lastPageCount = 1
         /// 直近の見開き設定(変化時のみ再フィット・merged 再構築)
         var lastIsTwoPage = false
+        /// 直近のスクロール方向(変化時のみ再フィット・merged 再構築)
+        var lastIsHorizontal = true
         /// ジャンプ(プログラムスクロール)を処理中か(1要求につき1回に抑える)
         var isScrollPending = false
         /// 図形置換で drawing を差し替える間の再入を無視するフラグ

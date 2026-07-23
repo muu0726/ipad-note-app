@@ -67,6 +67,31 @@ struct PersistenceController {
         }
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        if !inMemory && !Self.shouldResetStore {
+            Self.migrateLegacyPagedScrollDirection(in: container.viewContext)
+        }
+    }
+
+    /// スクロール方向を「ノートごとにユーザーが選べる設定」へ格上げしたことに伴う一度きりの移行。
+    /// これ以前は通常ノートを開くたびに強制的に横スクロールへ書き換えていたため、
+    /// 保存済みの `isHorizontalScroll == false`(強制横化時代の既定値)は「ユーザーが縦を選んだ」
+    /// ではなく単なるレガシー値。既存ノートの見た目を変えないよう、初回だけ横へ揃える。
+    /// 以降はユーザーが設定した縦/横がそのまま保持される。
+    private static func migrateLegacyPagedScrollDirection(in context: NSManagedObjectContext) {
+        let key = "paged.scrollDirection.migratedToPerNote.v1"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: key) else { return }
+
+        let request = NSFetchRequest<NSManagedObject>(entityName: "NoteFile")
+        request.predicate = NSPredicate(format: "noteType == %@ AND isHorizontalScroll == NO", "paged")
+        context.performAndWait {
+            if let notes = try? context.fetch(request) {
+                for note in notes { note.setValue(true, forKey: "isHorizontalScroll") }
+                if context.hasChanges { try? context.save() }
+            }
+            defaults.set(true, forKey: key)
+        }
     }
 
     /// 指定 URL の SQLite ストア(と付随する -wal / -shm)を破棄する。UIテストの初期化用。

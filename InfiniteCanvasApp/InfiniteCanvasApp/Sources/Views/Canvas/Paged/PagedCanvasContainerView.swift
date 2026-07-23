@@ -38,6 +38,19 @@ final class PageCanvasView: PKCanvasView {
     }
 }
 
+/// 左右に余白を持つラベル(カプセル型インジケーター用)。
+private final class PaddedLabel: UILabel {
+    var contentInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: contentInsets))
+    }
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(width: size.width + contentInsets.left + contentInsets.right,
+                      height: size.height + contentInsets.top + contentInsets.bottom)
+    }
+}
+
 /// GoodNotes 型ページネーションの通常ノートコンテナ。
 /// 素の UIScrollView(ズーム対象 = contentView)の中に、
 ///   背景(机のグレー+ページ用紙、BackgroundPatternUIView)
@@ -57,6 +70,8 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
     /// 「隣のページを隠す」モードでアクティブページの左右を覆う机色マスク(コンテンツ座標・最前面)
     private let leftMask = UIView()
     private let rightMask = UIView()
+    /// 末尾オーバースクロールで「離すとページ追加」を知らせるインジケーター(画面固定・最前面)
+    private let appendIndicator = PaddedLabel()
 
     /// 実体化中のページキャンバス(pageIndex → canvas)
     private(set) var pageCanvases: [Int: PageCanvasView] = [:]
@@ -162,6 +177,23 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
             contentView.addSubview(mask)
         }
 
+        // 末尾オーバースクロールの「＋ ページ追加」インジケーター(画面固定・タッチ透過・既定は非表示)。
+        // 重要: スクロール中はフレーム/サブビュー順を一切触らず alpha だけを変える(合成ドラッグや
+        // 進行中パンのキャンセルを避けるため)。サイズ・位置は positionAppendIndicator() で確定させる。
+        appendIndicator.text = "＋ ページを追加"
+        appendIndicator.textAlignment = .center
+        appendIndicator.font = .preferredFont(forTextStyle: .subheadline)
+        appendIndicator.textColor = .label
+        appendIndicator.backgroundColor = .tertiarySystemBackground
+        appendIndicator.layer.cornerRadius = 16
+        appendIndicator.layer.masksToBounds = true
+        appendIndicator.isUserInteractionEnabled = false
+        appendIndicator.alpha = 0
+        appendIndicator.bounds = CGRect(x: 0, y: 0, width: 200, height: 40)
+        appendIndicator.isAccessibilityElement = true
+        appendIndicator.accessibilityIdentifier = "paged-append-indicator"
+        addSubview(appendIndicator)
+
         // オブジェクトのない場所のタップで選択解除 / 配置モードのタップ配置
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap(_:)))
         tap.cancelsTouchesInView = false
@@ -175,6 +207,7 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
     override func layoutSubviews() {
         super.layoutSubviews()
         scrollView.frame = bounds
+        positionAppendIndicator()
         if bounds.size != lastLayoutBoundsSize {
             let isFirstLayout = lastLayoutBoundsSize == .zero
             lastLayoutBoundsSize = bounds.size
@@ -210,6 +243,7 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
         updateZoomLimits()
         updateVisiblePages()
         updateAdjacentPageMask()  // 見開きトグル等でページ矩形が動いたらマスクも再計算
+        positionAppendIndicator()  // スクロール方向に応じてインジケーター位置を確定
     }
 
     /// contentView / 背景 / オブジェクト層をコンテンツ座標サイズへ合わせる。
@@ -345,7 +379,9 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
     /// 隣ページを見せて滑らかにスライドさせるため一旦外す。マスクはコンテンツ座標の contentView 子
     /// なのでズーム/スクロール追従は自動。ページ実体化(materialize)の後に呼ぶと最前面を保てる。
     private func updateAdjacentPageMask() {
-        guard hideAdjacentPages, !isScrollActive, bounds.width > 0, layout.pageCount > 0 else {
+        // 隣ページ隠しは横めくり専用(縦連続スクロールでは意味を成さない)
+        guard hideAdjacentPages, layout.scrollsHorizontally,
+              !isScrollActive, bounds.width > 0, layout.pageCount > 0 else {
             leftMask.isHidden = true
             rightMask.isHidden = true
             return
@@ -401,19 +437,33 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
 
     // MARK: - ズーム・フィット
 
-    /// 1ユニット(1ページ or 見開き)が margin 込みで画面に収まるフィット倍率。
-    func minimumFitZoom() -> CGFloat {
-        guard bounds.width > 0, bounds.height > 0 else { return 0.5 }
+    /// 1ユニット(1ページ or 見開き)の幅・高さ(margin 抜きの用紙実寸)。
+    private func unitSize() -> CGSize {
         let unitWidth: CGFloat
-        let unitHeight = PageMetrics.height
         if layout.isTwoPageLayout {
             unitWidth = 2 * PageMetrics.width + (layout.isHorizontalScroll ? 0 : PageMetrics.gap)
         } else {
             unitWidth = PageMetrics.width
         }
+        return CGSize(width: unitWidth, height: PageMetrics.height)
+    }
+
+    /// 1ユニットが margin 込みで画面に**全体**収まるフィット倍率(= ズーム下限)。
+    func minimumFitZoom() -> CGFloat {
+        guard bounds.width > 0, bounds.height > 0 else { return 0.5 }
+        let unit = unitSize()
         let availW = max(1, bounds.width - PageMetrics.margin * 2)
         let availH = max(1, bounds.height - PageMetrics.margin * 2)
-        return min(availW / unitWidth, availH / unitHeight)
+        return min(availW / unit.width, availH / unit.height)
+    }
+
+    /// ノートを開く/リフィットするときの既定ズーム。
+    /// 横めくり=ページ全体(fit-page)、縦連続=用紙幅ぴったり(fit-width, GoodNotes 挙動)。
+    func defaultFitZoom() -> CGFloat {
+        guard bounds.width > 0, bounds.height > 0 else { return 0.5 }
+        if layout.scrollsHorizontally { return minimumFitZoom() }
+        let availW = max(1, bounds.width - PageMetrics.margin * 2)
+        return availW / unitSize().width
     }
 
     private func updateZoomLimits() {
@@ -464,7 +514,7 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
     func fitToPage(_ page: Int, animated: Bool) {
         guard bounds.width > 0 else { return }
         updateZoomLimits()
-        let fit = min(max(minimumFitZoom(), scrollView.minimumZoomScale), scrollView.maximumZoomScale)
+        let fit = min(max(defaultFitZoom(), scrollView.minimumZoomScale), scrollView.maximumZoomScale)
         let apply = {
             self.scrollView.zoomScale = fit
             self.applyContentSize()
@@ -582,6 +632,7 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateVisiblePages()
+        updateAppendIndicator()
         emitViewport()
     }
 
@@ -611,19 +662,49 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
         return scrollView.contentOffset.y - maxY
     }
 
+    /// 末尾オーバースクロールでページ追加が確定する引っ張り量のしきい値。
+    private func appendThreshold() -> CGFloat { min(scrollView.bounds.width * 0.15, 140) }
+
+    /// インジケーターの位置・サイズを確定させる(横=右端中央 / 縦=下端中央)。
+    /// スクロール中は呼ばず、bounds・レイアウト変更時のみ呼ぶ(ジェスチャを乱さないため)。
+    private func positionAppendIndicator() {
+        let inset: CGFloat = 20
+        appendIndicator.center = layout.scrollsHorizontally
+            ? CGPoint(x: bounds.maxX - appendIndicator.bounds.width / 2 - inset, y: bounds.midY)
+            : CGPoint(x: bounds.midX, y: bounds.maxY - appendIndicator.bounds.height / 2 - inset)
+    }
+
+    /// 末尾オーバースクロール量に応じて「＋ ページ追加」インジケーターの alpha だけを更新する。
+    /// フレーム・テキスト・サブビュー順は触らない(進行中パンのキャンセルを避ける)。
+    private func updateAppendIndicator() {
+        let appearAt: CGFloat = 24
+        let over = trailingOverscroll(scrollView)
+        guard over > appearAt, scrollView.isDragging || scrollView.isDecelerating else {
+            appendIndicator.alpha = 0
+            return
+        }
+        let progress = min(1, (over - appearAt) / max(1, appendThreshold() - appearAt))
+        appendIndicator.alpha = 0.4 + 0.6 * progress
+    }
+
+    private func hideAppendIndicator() {
+        appendIndicator.alpha = 0
+    }
+
     /// 末尾を超えて一定量めくったら、指を離した時点でページを1枚追加する(GoodNotes 風)。
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        let threshold = min(scrollView.bounds.width * 0.15, 140)
-        if !didRequestPageAppend, trailingOverscroll(scrollView) > threshold {
+        if !didRequestPageAppend, trailingOverscroll(scrollView) > appendThreshold() {
             didRequestPageAppend = true  // ページ数増加の反映時に解除される
             onAppendPage?()
         }
+        hideAppendIndicator()
         // 減速へ移らずここで止まる場合は停止確定。減速するなら scrollViewDidEndDecelerating で再遮蔽する。
         if !decelerate { setScrollActive(false) }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         setScrollActive(false)  // 慣性停止 → 隣ページを再遮蔽
+        hideAppendIndicator()
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
