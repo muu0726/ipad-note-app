@@ -298,6 +298,7 @@ struct NoteCanvasView: View {
                 onTextSelectionChanged: { handleTextSelectionChanged($0) },
                 onLassoObjectsMoved: { region, delta in moveObjectsWithLasso(in: region, by: delta) },
                 onLassoObjectsDeleted: { region in deleteObjectsWithLasso(in: region) },
+                onCanvasRebased: { delta in rebaseCanvas(by: delta) },
                 onNoteLinkActivated: { id in openLinkedNote(objectID: id) },
                 onObjectShapeEditRequested: { id in requestShapeEdit(id) },
                 onObjectTableChanged: { id, payload in handleObjectTableChanged(id, payload: payload) },
@@ -954,6 +955,16 @@ struct NoteCanvasView: View {
         scheduleAutoSave()
     }
 
+    /// 無限キャンバスの原点リベースで座標系全体が平行移動したとき、全オブジェクトの座標にも
+    /// 同じ量を反映する。内部座標系の実装詳細でありユーザー操作ではないため、Undo 登録はしない
+    /// (見た目は一切動かないので Undo 対象にする必要がない。自動保存デバウンスに任せる)。
+    private func rebaseCanvas(by delta: CGVector) {
+        for object in objects where !object.isDeleted {
+            object.contentFrame = object.contentFrame.offsetBy(dx: delta.dx, dy: delta.dy)
+        }
+        scheduleAutoSave()
+    }
+
     // MARK: - オブジェクト操作の書き戻し
 
     private func withObject(_ id: NSManagedObjectID, _ mutate: (CanvasObject) -> Void) {
@@ -1095,7 +1106,7 @@ struct NoteCanvasView: View {
             let firstPage = layout.pageRect(0)
             return CGPoint(x: firstPage.midX, y: firstPage.midY)
         }
-        let half = CanvasRepresentable.canvasSize / 2
+        let half = DynamicCanvasBounds.initialWorldSize / 2
         return CGPoint(x: half, y: half)
     }
 

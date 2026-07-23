@@ -84,13 +84,14 @@ struct PagedLayoutCalculator: Equatable {
 }
 
 
-/// PKCanvasView を「巨大キャンバス + ズーム」として構成する UIViewRepresentable。
-/// PKCanvasView は UIScrollView のサブクラスなので、巨大な contentSize と
-/// ズーム設定だけで疑似無限キャンバス(100,000 x 100,000 pt)を実現する。
+/// PKCanvasView を「動的に拡張するキャンバス + ズーム」として構成する UIViewRepresentable。
+/// PKCanvasView は UIScrollView のサブクラスなので、contentSize とズーム設定だけで
+/// 無限キャンバスを実現する。ワールドサイズ(contentSize の一辺)はコンテンツの外接矩形に
+/// 合わせて `Coordinator.worldSize` が動的に伸ばす(`DynamicCanvasBounds` 参照)。
+/// 右・下方向は contentSize を伸ばすだけ、左・上方向は原点リベース(座標系全体の平行移動)で
+/// 対応するため、固定サイズの壁に当たることはない。
 /// ズームすると描画・背景パターンごとスケーリングされる(要件②)。
 struct CanvasRepresentable: UIViewRepresentable {
-    static let canvasSize: CGFloat = 100_000
-
     @Binding var drawing: PKDrawing
     let pkTool: PKTool
     let isSelectMode: Bool
@@ -132,6 +133,9 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onLassoObjectsMoved: (CGRect, CGVector) -> Void
     /// 投げ縄でインクを削除したとき(削除された領域)。領域に重なるオブジェクトも削除する
     let onLassoObjectsDeleted: (CGRect) -> Void
+    /// 無限キャンバスの原点リベースで座標系全体が平行移動したとき(delta)。
+    /// オブジェクト(Core Data)側の x/y にも同じ量を加算して座標を合わせる(内部実装の詳細のため Undo 対象外)。
+    let onCanvasRebased: (CGVector) -> Void
     /// ノートリンクのダブルタップでリンク先ノートを開く要求
     let onNoteLinkActivated: (NSManagedObjectID) -> Void
     /// 図形のダブルタップで編集ポップオーバーを開く要求
@@ -171,26 +175,22 @@ struct CanvasRepresentable: UIViewRepresentable {
         )
     }
 
-    /// ノート形式に応じたキャンバスのコンテンツサイズ
-    private var contentSize: CGSize {
-        switch noteType {
-        case .infinite:
-            return CGSize(width: Self.canvasSize, height: Self.canvasSize)
-        case .paged:
-            return layout.contentSize
-        }
-    }
-
-    /// コンテンツサイズ・背景レイヤーのフレーム・ページ描画・スクロール方向を現在の形式へ合わせる。
-    /// make と update の両方から呼ぶ(冪等)。
+    /// 背景レイヤーのフレーム・ページ描画・スクロール方向を現在の形式へ合わせる。
+    /// make と update の両方から呼ぶ(冪等)。無限キャンバスの contentSize/フレーム/
+    /// スクロール制限は動的ワールドサイズに依存するため、ここでは扱わず
+    /// `Coordinator.refreshInfiniteWorld(in:)` が別途管理する。
     private func applyLayout(to container: CanvasContainerUIView) {
-        let size = contentSize
         let canvas = container.canvasView
-        canvas.contentSize = size
-        container.patternView.frame = CGRect(origin: .zero, size: size)
-        container.objectLayer.frame = CGRect(origin: .zero, size: size)
 
-        // オブジェクト層のクリップ: 10万pt四方の無限キャンバス層で masksToBounds を有効にすると、
+        // 通常ノートのみ、ここで contentSize を確定する(ページ数・レイアウトから決定論的に計算できる)。
+        if noteType == .paged {
+            let size = layout.contentSize
+            canvas.contentSize = size
+            container.patternView.frame = CGRect(origin: .zero, size: size)
+            container.objectLayer.frame = CGRect(origin: .zero, size: size)
+        }
+
+        // オブジェクト層のクリップ: 無限キャンバス層(ワールド全域)で masksToBounds を有効にすると、
         // ズーム時の実効ピクセルが GPU のレンダバッファ上限を超えて層ごと描画が黙って失敗し、
         // オブジェクトが全て見えなくなる。無限はクリップ不要(層=キャンバス全域)なので無効化する。
         container.objectLayer.clipsToBounds = (noteType == .paged)
@@ -219,8 +219,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                 canvas.minimumZoomScale = min(pagedMinimumZoom(for: canvas), canvas.maximumZoomScale)
             case .infinite:
                 canvas.minimumZoomScale = 0.1
-                // フリーボードに合わせて上限 400%
-                canvas.maximumZoomScale = 4.0
+                // フリーボードに合わせて上限 500%
+                canvas.maximumZoomScale = 5.0
             }
         }
 
@@ -238,12 +238,12 @@ struct CanvasRepresentable: UIViewRepresentable {
             noteType: noteType, layout: layout,
             style: backgroundStyle, pageColor: pageColor
         )
-
-        applyInfiniteScrollLimit(to: container)
     }
 
     /// 無限キャンバスのコンテンツ外接矩形(描画+オブジェクト)。コンテンツが無ければ nil。
-    private var infiniteContentUnion: CGRect? {
+    /// `Coordinator.refreshInfiniteWorld(in:)` がワールドサイズ・原点リベース・
+    /// スクロール制限の判定にすべてこれを使う(単一の情報源)。
+    fileprivate var infiniteContentUnion: CGRect? {
         var union = CGRect.null
         let drawingBounds = drawing.bounds
         if !drawingBounds.isNull, !drawingBounds.isEmpty {
@@ -253,37 +253,6 @@ struct CanvasRepresentable: UIViewRepresentable {
             union = union.union(object.contentFrame)
         }
         return union.isNull ? nil : union
-    }
-
-    /// 無限キャンバスのスクロール範囲を「コンテンツ+余白1画面分」へ制限する(Freeform 風)。
-    /// 描画・オブジェクトの変化(applyLayout 経由)、ズーム、bounds 変化のたびに呼び直す。
-    fileprivate func applyInfiniteScrollLimit(to container: CanvasContainerUIView) {
-        guard noteType == .infinite else { return }
-        let canvas = container.canvasView
-        guard canvas.bounds.width > 0, canvas.bounds.height > 0 else { return }
-        let allowed = InfiniteScrollLimiter.allowedRect(
-            contentUnion: infiniteContentUnion,
-            viewportSize: canvas.bounds.size,
-            zoomScale: canvas.zoomScale,
-            canvasSize: Self.canvasSize
-        )
-        canvas.contentInset = InfiniteScrollLimiter.insets(
-            allowedRect: allowed, zoomScale: canvas.zoomScale, canvasSize: Self.canvasSize
-        )
-    }
-
-    /// 現在の許可範囲で contentOffset をクランプする(復元・リセット等のプログラム設定用)
-    fileprivate func clampedInfiniteOffset(_ offset: CGPoint, for canvas: UIScrollView) -> CGPoint {
-        let allowed = InfiniteScrollLimiter.allowedRect(
-            contentUnion: infiniteContentUnion,
-            viewportSize: canvas.bounds.size,
-            zoomScale: canvas.zoomScale,
-            canvasSize: Self.canvasSize
-        )
-        return InfiniteScrollLimiter.clampedOffset(
-            offset, allowedRect: allowed,
-            zoomScale: canvas.zoomScale, viewportSize: canvas.bounds.size
-        )
     }
 
     func makeUIView(context: Context) -> CanvasContainerUIView {
@@ -298,6 +267,11 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.backgroundColor = containerBackgroundColor
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)
+        if noteType == .infinite {
+            // bounds 未確定でもコンテンツ量だけでワールドサイズの初期値を確保しておく
+            // (bounds 確定後に async ブロックで正確に計算し直す)。
+            context.coordinator.refreshInfiniteWorld(in: container)
+        }
         context.coordinator.lastPageCount = pageCount
         context.coordinator.lastIsTwoPage = isTwoPageLayout
         context.coordinator.lastIsHorizontal = isHorizontalScroll
@@ -367,7 +341,7 @@ struct CanvasRepresentable: UIViewRepresentable {
             } else if noteType == .paged {
                 fitPaged(canvas)  // ページを画面にフィット + 先頭ページへ
             } else {
-                let size = Self.canvasSize
+                let size = context.coordinator.worldSize
                 canvas.contentOffset = CGPoint(
                     x: (size - canvas.bounds.width) / 2,
                     y: (size - canvas.bounds.height) / 2
@@ -375,9 +349,9 @@ struct CanvasRepresentable: UIViewRepresentable {
             }
             if noteType == .paged { centerPagedContent(canvas) }
             if noteType == .infinite {
-                // bounds 確定後にスクロール制限を計算し直し、復元位置も範囲内へ収める
-                applyInfiniteScrollLimit(to: container)
-                canvas.contentOffset = clampedInfiniteOffset(canvas.contentOffset, for: canvas)
+                // bounds 確定後にワールドサイズ・スクロール制限を計算し直し、復元位置も範囲内へ収める
+                context.coordinator.refreshInfiniteWorld(in: container)
+                canvas.contentOffset = context.coordinator.clampedInfiniteOffset(canvas.contentOffset, for: canvas)
             }
             // 復元したズームをスナップ閾値・背景タイル解像度へ反映
             container.objectLayer.applyZoom(canvas.zoomScale)
@@ -438,7 +412,7 @@ struct CanvasRepresentable: UIViewRepresentable {
     /// 現在のズームでの通常ノート用 contentInset(横断方向センタリング + 端の余白)
     private func pagedContentInset(for canvas: UIScrollView) -> UIEdgeInsets? {
         guard noteType == .paged else { return nil }
-        let size = contentSize
+        let size = layout.contentSize
         if isHorizontalScroll {
             let contentH = size.height * canvas.zoomScale
             let vInset = max(0, (canvas.bounds.height - contentH) / 2)
@@ -465,6 +439,10 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.objectLayer.backgroundStyle = backgroundStyle
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)  // 背景スタイル・用紙色・ページ数・レイアウトの変化を反映
+        if noteType == .infinite {
+            // 描画・オブジェクトの変化のたびにワールドサイズ(拡張/原点リベース)を再判定する
+            context.coordinator.refreshInfiniteWorld(in: container)
+        }
 
         // レイアウト設定(見開き / スクロール方向)が変わったら、安全に再フィット + 再センタリング。
         // ページ数の変化は含めない(それはページ追加スクロールで扱う)。
@@ -533,11 +511,11 @@ struct CanvasRepresentable: UIViewRepresentable {
                         )
                         canvas.contentOffset = CGPoint(x: offsetX, y: -PageMetrics.margin)
                     } else {
-                        let size = Self.canvasSize
-                        // スクロール制限を新ズームで計算し直し、中央がコンテンツから遠い場合は
-                        // 許可範囲(コンテンツ+余白)内へクランプする
-                        self.applyInfiniteScrollLimit(to: container)
-                        canvas.contentOffset = self.clampedInfiniteOffset(
+                        // ワールドサイズ・スクロール制限を新ズームで計算し直し、中央がコンテンツから
+                        // 遠い場合は許可範囲(コンテンツ+余白)内へクランプする
+                        context.coordinator.refreshInfiniteWorld(in: container)
+                        let size = context.coordinator.worldSize
+                        canvas.contentOffset = context.coordinator.clampedInfiniteOffset(
                             CGPoint(
                                 x: (size - canvas.bounds.width) / 2,
                                 y: (size - canvas.bounds.height) / 2
@@ -580,6 +558,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         /// ページ数はここに含めない(ページ追加はスクロール処理側で扱う)
         var lastIsTwoPage = false
         var lastIsHorizontal = false
+        /// 無限キャンバスの現在のワールドサイズ(コンテンツ座標、正方形の一辺)。
+        /// コンテンツ+マージンに応じて伸びるのみで、縮小はしない(削除操作でジャンプしないように)。
+        var worldSize: CGFloat = DynamicCanvasBounds.initialWorldSize
         /// 図形置換・マーカー背面化で drawing を差し替える間の再入を無視するフラグ(無限再描画ループ防止)
         private var isReplacingDrawing = false
         /// 投げ縄でのインク移動・削除を差分検知するための直前の描画
@@ -608,11 +589,87 @@ struct CanvasRepresentable: UIViewRepresentable {
         private func handleBoundsChange() {
             guard let container else { return }
             if parent.noteType == .infinite {
-                parent.applyInfiniteScrollLimit(to: container)
+                refreshInfiniteWorld(in: container)
                 return
             }
             guard let inset = parent.pagedContentInset(for: container.canvasView) else { return }
             container.canvasView.contentInset = inset
+        }
+
+        // MARK: - 無限キャンバスの動的ワールド管理
+
+        /// 無限キャンバスのワールドサイズ(= contentSize の一辺)を、現在のコンテンツに合わせて
+        /// 更新する。右・下方向は worldSize を伸ばすだけ、左・上方向は端に近づいたら
+        /// 原点リベース(ストローク・オブジェクト座標・contentOffset を一括平行移動)で対応する。
+        /// applyLayout 相当の反映(contentSize/フレーム/スクロール制限)もここでまとめて行う。
+        /// 描画・オブジェクトの変化、ズーム、bounds 変化のたびに呼び直す(冪等)。
+        func refreshInfiniteWorld(in container: CanvasContainerUIView) {
+            guard parent.noteType == .infinite else { return }
+            if let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: parent.infiniteContentUnion) {
+                rebaseOrigin(by: delta, in: container)
+            }
+            worldSize = DynamicCanvasBounds.expandedWorldSize(
+                contentUnion: parent.infiniteContentUnion, currentWorldSize: worldSize
+            )
+            applyWorldSize(to: container)
+        }
+
+        /// worldSize をキャンバスの contentSize・背景/オブジェクトレイヤーのフレーム・
+        /// スクロール制限(InfiniteScrollLimiter)へ反映する。
+        private func applyWorldSize(to container: CanvasContainerUIView) {
+            let canvas = container.canvasView
+            let size = CGSize(width: worldSize, height: worldSize)
+            if canvas.contentSize != size {
+                canvas.contentSize = size
+                container.patternView.frame = CGRect(origin: .zero, size: size)
+                container.objectLayer.frame = CGRect(origin: .zero, size: size)
+            }
+            guard canvas.bounds.width > 0, canvas.bounds.height > 0 else { return }
+            let allowed = InfiniteScrollLimiter.allowedRect(
+                contentUnion: parent.infiniteContentUnion,
+                viewportSize: canvas.bounds.size, zoomScale: canvas.zoomScale, canvasSize: worldSize
+            )
+            canvas.contentInset = InfiniteScrollLimiter.insets(
+                allowedRect: allowed, zoomScale: canvas.zoomScale, canvasSize: worldSize
+            )
+        }
+
+        /// 現在の許可範囲で contentOffset をクランプする(復元・リセット等のプログラム設定用)
+        func clampedInfiniteOffset(_ offset: CGPoint, for canvas: UIScrollView) -> CGPoint {
+            let allowed = InfiniteScrollLimiter.allowedRect(
+                contentUnion: parent.infiniteContentUnion,
+                viewportSize: canvas.bounds.size, zoomScale: canvas.zoomScale, canvasSize: worldSize
+            )
+            return InfiniteScrollLimiter.clampedOffset(
+                offset, allowedRect: allowed,
+                zoomScale: canvas.zoomScale, viewportSize: canvas.bounds.size
+            )
+        }
+
+        /// 原点リベース: コンテンツが左・上端の余白を切ったら、ストローク・オブジェクト座標・
+        /// contentOffset を delta だけ一括平行移動し、見た目を変えずに原点を再定義する
+        /// (座標を負にできない PKCanvasView の制約下で、左・上方向への無限拡張を可能にする)。
+        /// 内部座標系の実装詳細でありユーザー操作ではないため、Undo には登録しない。
+        private func rebaseOrigin(by delta: CGVector, in container: CanvasContainerUIView) {
+            let canvas = container.canvasView
+            let transform = CGAffineTransform(translationX: delta.dx, y: delta.dy)
+
+            isReplacingDrawing = true
+            let shifted = canvas.drawing.transformed(using: transform)
+            canvas.drawing = shifted
+            isCanvasSourceOfTruth = true
+            parent.drawing = shifted
+            isCanvasSourceOfTruth = false
+            previousDrawing = shifted
+            lastStrokeCount = shifted.strokes.count
+            isReplacingDrawing = false
+
+            parent.onCanvasRebased(delta)
+
+            canvas.contentOffset = CGPoint(
+                x: canvas.contentOffset.x + delta.dx * canvas.zoomScale,
+                y: canvas.contentOffset.y + delta.dy * canvas.zoomScale
+            )
         }
 
         // MARK: - スクロール/ズーム(UIScrollViewDelegate 経由。KVO は使わない)
@@ -703,9 +760,9 @@ struct CanvasRepresentable: UIViewRepresentable {
                let inset = parent.pagedContentInset(for: canvas) {
                 canvas.contentInset = inset
             }
-            // 無限キャンバスはズームでスクロール制限(余白1画面分)を計算し直す
+            // 無限キャンバスはズームでワールドサイズ・スクロール制限を計算し直す
             if parent.noteType == .infinite, let container {
-                parent.applyInfiniteScrollLimit(to: container)
+                refreshInfiniteWorld(in: container)
             }
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
@@ -939,7 +996,9 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        let canvasSize = CanvasRepresentable.canvasSize
+        // 初期サイズはプレースホルダ(makeUIView が直後に applyLayout/refreshInfiniteWorld で
+        // 実際のノート形式・コンテンツに応じたサイズへ上書きする)。
+        let canvasSize = DynamicCanvasBounds.initialWorldSize
 
         // PencilKit はダークモード時にインク色を自動反転する(黒⇄白)が、
         // 用紙色(白/黒)はアプリ側で管理しているため反転を止め、選んだ色のまま描く
