@@ -64,6 +64,11 @@ final class ObjectLayerUIView: UIView {
     var selectedID: NSManagedObjectID? { selectedIDs.count == 1 ? selectedIDs.first : nil }
     private var objectViews: [NSManagedObjectID: CanvasObjectUIView] = [:]
     private let guideLayer = CAShapeLayer()
+    /// 複数選択(2個以上)時に出す統一バウンディングボックス + 8方向リサイズハンドル。
+    private let selectionOverlay = SelectionOverlayView()
+    /// リサイズ開始時の各オブジェクトのフレームと選択枠(比例スケールの基準)。
+    private var resizeStartFrames: [NSManagedObjectID: CGRect] = [:]
+    private var resizeStartBox: CGRect = .zero
 
     /// グリッドスナップの有効判定に使う(白紙のときはグリッドへ吸着しない)
     var backgroundStyle: CanvasBackgroundStyle = .blank
@@ -87,6 +92,13 @@ final class ObjectLayerUIView: UIView {
         guideLayer.lineWidth = 1
         guideLayer.fillColor = nil
         layer.addSublayer(guideLayer)
+
+        selectionOverlay.frame = bounds
+        selectionOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        selectionOverlay.onResize = { [weak self] handle, translation, state in
+            self?.resizeSelection(handle: handle, translation: translation, state: state)
+        }
+        addSubview(selectionOverlay)
     }
 
     @available(*, unavailable)
@@ -98,6 +110,9 @@ final class ObjectLayerUIView: UIView {
     /// スクロール・ズームによるオブジェクトの再配置はスクロールビューの合成が行うため不要。
     func applyZoom(_ zoom: CGFloat) {
         self.zoom = zoom
+        if !selectionOverlay.isHidden {
+            selectionOverlay.update(box: selectionOverlay.box, zoom: zoom)
+        }
     }
 
     // MARK: - モデル同期
@@ -122,6 +137,12 @@ final class ObjectLayerUIView: UIView {
             view.apply(item)
             bringSubviewToFront(view)  // items は zOrder 昇順なので前面順が保たれる
         }
+        // オブジェクトを前面へ出したあとも統一枠は最前面に保つ(選択中のとき)
+        if !selectionOverlay.isHidden {
+            bringSubviewToFront(selectionOverlay)
+            // 移動/リサイズでフレームが変わった選択に追従(操作中でなければ再計算)
+            if resizeStartFrames.isEmpty { refreshSelectionOverlay() }
+        }
     }
 
     // MARK: - 選択(単体・複数・グループ)
@@ -142,9 +163,63 @@ final class ObjectLayerUIView: UIView {
         selectedIDs = ids
         // 単体/複数でリサイズハンドルの出方が変わるので、選択中の全ビューを更新する
         for id in ids { objectViews[id]?.refreshSelectionChrome() }
+        refreshSelectionOverlay()
         notifyTextSelection()
         if (!ids.isEmpty) != hadSelection {
             onSelectionChanged?(!ids.isEmpty)
+        }
+    }
+
+    // MARK: - 統一選択枠(複数選択の一括リサイズ)
+
+    /// 選択集合のうち、移動・リサイズ可能な(非ロック)オブジェクトのフレーム。
+    private func selectableSelectedFrames() -> [NSManagedObjectID: CGRect] {
+        var frames: [NSManagedObjectID: CGRect] = [:]
+        for id in selectedIDs {
+            if let view = objectViews[id], !view.isMovementLocked {
+                frames[id] = view.contentFrame
+            }
+        }
+        return frames
+    }
+
+    /// 複数選択(非ロック2個以上)のとき統一枠を表示し、そうでなければ隠す。
+    /// 単体選択は従来どおり各オブジェクトの右下ハンドルでリサイズする(枠は出さない)。
+    private func refreshSelectionOverlay() {
+        let frames = selectableSelectedFrames()
+        guard frames.count >= 2, let box = SelectionGeometry.boundingBox(of: Array(frames.values)) else {
+            selectionOverlay.setActive(false)
+            return
+        }
+        selectionOverlay.setActive(true)
+        selectionOverlay.update(box: box, zoom: zoom)
+        bringSubviewToFront(selectionOverlay)
+    }
+
+    /// 統一枠のハンドルドラッグで選択全体を比例リサイズする。
+    /// 一括移動(moveSelection)と同じ「同一イベント内で複数 onFrameChanged → 1つの Undo グループ」パターン。
+    func resizeSelection(handle: SelectionHandle, translation t: CGVector, state: UIGestureRecognizer.State) {
+        switch state {
+        case .began:
+            resizeStartFrames = selectableSelectedFrames()
+            resizeStartBox = SelectionGeometry.boundingBox(of: Array(resizeStartFrames.values)) ?? .zero
+            for id in resizeStartFrames.keys { objectViews[id]?.setInteractingExternally(true) }
+        case .changed:
+            guard resizeStartBox.width > 0, resizeStartBox.height > 0 else { return }
+            let newBox = SelectionGeometry.resizedBox(resizeStartBox, handle: handle, translation: t)
+            for (id, start) in resizeStartFrames {
+                objectViews[id]?.moveContentFrame(to: SelectionGeometry.rescale(start, from: resizeStartBox, to: newBox))
+            }
+            selectionOverlay.update(box: newBox, zoom: zoom)
+        case .ended, .cancelled, .failed:
+            for (id, _) in resizeStartFrames {
+                objectViews[id]?.setInteractingExternally(false)
+                if let frame = objectViews[id]?.contentFrame { onFrameChanged?(id, frame) }
+            }
+            resizeStartFrames = [:]
+            refreshSelectionOverlay()
+        default:
+            break
         }
     }
 
@@ -197,12 +272,17 @@ final class ObjectLayerUIView: UIView {
             for (id, start) in groupMoveStart {
                 objectViews[id]?.moveContentFrame(to: start.offsetBy(dx: t.x, dy: t.y))
             }
+            if !selectionOverlay.isHidden,
+               let box = SelectionGeometry.boundingBox(of: Array(selectableSelectedFrames().values)) {
+                selectionOverlay.update(box: box, zoom: zoom)
+            }
         case .ended, .cancelled, .failed:
             for (id, _) in groupMoveStart {
                 objectViews[id]?.setInteractingExternally(false)
                 if let frame = objectViews[id]?.contentFrame { onFrameChanged?(id, frame) }
             }
             groupMoveStart = [:]
+            refreshSelectionOverlay()
         default:
             break
         }

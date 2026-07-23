@@ -132,6 +132,7 @@ GROUP_2_TARGETS=(
 GROUP_3_DESC="[Group 3: オブジェクト UI テスト] オブジェクト操作 (挿入/選択/リサイズ/削除、フォントサイズ変更と再起動復元、ドラッグ移動、図形自動整形、Todo)"
 GROUP_3_TARGETS=(
   "InfiniteCanvasAppUITests/ObjectInteractionUITests"
+  "InfiniteCanvasAppUITests/UnifiedSelectionUITests"
   "InfiniteCanvasAppUITests/FontSizeUITests"
   "InfiniteCanvasAppUITests/DragDropUITests"
   "InfiniteCanvasAppUITests/ShapeAssistUITests"
