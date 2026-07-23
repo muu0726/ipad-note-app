@@ -95,6 +95,9 @@ struct CanvasRepresentable: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     let pkTool: PKTool
     let isSelectMode: Bool
+    /// 投げ縄選択モード(`.lasso` ツール中)。true のとき PencilKit の描画/投げ縄ジェスチャを
+    /// 無効化し、自前ジェスチャでインク+オブジェクトを一括選択する(infinite ノートのみ)。
+    let isLassoSelectionMode: Bool
     /// タップ位置配置モードのツール(.text / .todo)。nil のときは通常(描画/選択)。
     let placementTool: CanvasTool?
     /// 配置モードでキャンバスをタップしたとき(ツール, コンテンツ座標)。
@@ -325,6 +328,20 @@ struct CanvasRepresentable: UIViewRepresentable {
             coordinator?.parent.onSelectionChanged(hasSelection)
         }
 
+        // 自前投げ縄: 描画ジェスチャ → 選択計算、統一枠の移動・削除でインク側を変換する。
+        container.onLassoPan = { [weak coordinator, weak container] gesture in
+            guard let coordinator, let container else { return }
+            coordinator.handleLassoPan(gesture, in: container)
+        }
+        container.objectLayer.onLassoStrokesMove = { [weak coordinator, weak container] t, state in
+            guard let coordinator, let container else { return }
+            coordinator.moveLassoStrokes(t, state: state, in: container)
+        }
+        container.objectLayer.onLassoStrokesDelete = { [weak coordinator, weak container] in
+            guard let coordinator, let container else { return }
+            coordinator.deleteLassoStrokes(in: container)
+        }
+
         // 初期ビューポート(保存がなければ形式ごとの初期位置)
         DispatchQueue.main.async {
             if let viewport = initialViewport {
@@ -432,10 +449,13 @@ struct CanvasRepresentable: UIViewRepresentable {
         canvas.tool = pkTool
         container.backgroundColor = containerBackgroundColor
         container.isSelectMode = isSelectMode
+        // 投げ縄選択モード(infinite のみ): PencilKit の描画/投げ縄ジェスチャを止め、自前ジェスチャに切り替える。
+        let lassoActive = isLassoSelectionMode && noteType == .infinite
+        container.isLassoMode = lassoActive
         // タップ位置配置モード(テキスト/Todo): 手書きジェスチャを止めてタップ配置に切り替える。
         container.placementTool = placementTool
         container.onPlaceObject = onPlaceObject
-        canvas.drawingGestureRecognizer.isEnabled = (placementTool == nil)
+        canvas.drawingGestureRecognizer.isEnabled = (placementTool == nil && !lassoActive)
         container.objectLayer.backgroundStyle = backgroundStyle
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)  // 背景スタイル・用紙色・ページ数・レイアウトの変化を反映
@@ -565,6 +585,13 @@ struct CanvasRepresentable: UIViewRepresentable {
         private var isReplacingDrawing = false
         /// 投げ縄でのインク移動・削除を差分検知するための直前の描画
         private var previousDrawing = PKDrawing()
+        /// 自前投げ縄(範囲選択マーキー): ドラッグ開始点と現在点(コンテンツ座標)
+        private var lassoStart: CGPoint = .zero
+        private var lassoCurrent: CGPoint = .zero
+        /// 自前投げ縄: 現在の一括選択(ストローク index + オブジェクト ID)
+        private var lassoSelection = SelectionSession()
+        /// 自前投げ縄: 統一枠ドラッグでのインク移動の基準描画(移動開始時)
+        private var lassoMoveStartDrawing: PKDrawing?
         /// スクロール/ズームのデリゲート処理でレイヤーへアクセスするための弱参照
         private weak var container: CanvasContainerUIView?
         /// image / pdf のレンダリング結果キャッシュ(payload のデコードは1回だけ)
@@ -863,6 +890,138 @@ struct CanvasRepresentable: UIViewRepresentable {
             }
         }
 
+        // MARK: - 自前投げ縄によるインク+オブジェクト一括選択(指示書 2.2「ドラッグおよび投げ縄」)
+
+        /// 範囲選択マーキー(開始点〜現在点の矩形)。
+        private var lassoRect: CGRect {
+            CGRect(x: min(lassoStart.x, lassoCurrent.x), y: min(lassoStart.y, lassoCurrent.y),
+                   width: abs(lassoCurrent.x - lassoStart.x), height: abs(lassoCurrent.y - lassoStart.y))
+        }
+        /// マーキー矩形の4隅(オーバーレイの破線描画用)。
+        private var lassoRectCorners: [CGPoint] {
+            let r = lassoRect
+            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+                    CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY)]
+        }
+
+        /// 範囲選択ドラッグの各段階を処理する。座標は objectLayer(コンテンツ空間)で読む。
+        func handleLassoPan(_ gesture: UIPanGestureRecognizer, in container: CanvasContainerUIView) {
+            let point = gesture.location(in: container.objectLayer)
+            switch gesture.state {
+            case .began:
+                container.objectLayer.clearLassoSelection()
+                lassoSelection = SelectionSession()
+                lassoStart = point; lassoCurrent = point
+            case .changed:
+                lassoCurrent = point
+                container.objectLayer.updateLassoDrawing(points: lassoRectCorners)
+            case .ended:
+                lassoCurrent = point
+                finishLasso(in: container)
+            case .cancelled, .failed:
+                container.objectLayer.lassoView.clear()
+            default:
+                break
+            }
+        }
+
+        /// 範囲を確定してインクストローク + オブジェクトを一括選択し、統一枠を表示する。
+        private func finishLasso(in container: CanvasContainerUIView) {
+            let rect = lassoRect
+            guard rect.width > 4, rect.height > 4 else {
+                container.objectLayer.lassoView.clear(); return
+            }
+            let polygon = LassoHitTesting.polygon(from: rect)
+
+            // インク: サンプル点の6割以上が内側のストロークを選ぶ(renderBounds で早期除外)
+            var indices: Set<Int> = []
+            var strokeBounds: [CGRect] = []
+            for (i, stroke) in container.canvasView.drawing.strokes.enumerated() {
+                let rb = stroke.renderBounds
+                guard LassoHitTesting.canIntersect(rb, lassoBounds: rect) else { continue }
+                if LassoHitTesting.strokeIsSelected(samplePoints: sampledPoints(of: stroke), inside: polygon) {
+                    indices.insert(i); strokeBounds.append(rb)
+                }
+            }
+
+            // オブジェクト: 中心が内側のものを選ぶ
+            var objectIDs: Set<NSManagedObjectID> = []
+            var objectFrames: [CGRect] = []
+            for object in parent.objects where !object.isDeleted && object.managedObjectContext != nil {
+                let frame = object.contentFrame
+                if LassoHitTesting.rectIsSelected(frame, inside: polygon) {
+                    objectIDs.insert(object.objectID); objectFrames.append(frame)
+                }
+            }
+
+            guard let box = SelectionSession.combinedBoundingBox(strokeBounds: strokeBounds, objectFrames: objectFrames) else {
+                container.objectLayer.lassoView.clear(); return
+            }
+            lassoSelection = SelectionSession(strokeIndices: indices, objectIDs: objectIDs)
+            container.objectLayer.beginLassoSelection(objectIDs: objectIDs, box: box)
+        }
+
+        /// PKStroke の描画点をコンテンツ座標のサンプル点列にする(stroke.transform 適用)。
+        private func sampledPoints(of stroke: PKStroke) -> [CGPoint] {
+            var points: [CGPoint] = []
+            for point in stroke.path.interpolatedPoints(by: .distance(8)) {
+                points.append(point.location.applying(stroke.transform))
+            }
+            return points
+        }
+
+        /// 選択ストロークを平行移動した描画を作る。
+        private func translatedDrawing(_ drawing: PKDrawing, by t: CGVector) -> PKDrawing {
+            var strokes = drawing.strokes
+            let tf = CGAffineTransform(translationX: t.dx, y: t.dy)
+            for i in lassoSelection.strokeIndices where strokes.indices.contains(i) {
+                strokes[i].transform = strokes[i].transform.concatenating(tf)
+            }
+            var out = drawing
+            out.strokes = strokes
+            return out
+        }
+
+        /// 統一枠ドラッグ中の選択ストロークの移動(.changed はプレビュー、.ended で1手 Undo 登録)。
+        func moveLassoStrokes(_ t: CGVector, state: UIGestureRecognizer.State, in container: CanvasContainerUIView) {
+            guard !lassoSelection.strokeIndices.isEmpty else { return }
+            switch state {
+            case .began:
+                lassoMoveStartDrawing = container.canvasView.drawing
+            case .changed:
+                guard let start = lassoMoveStartDrawing else { return }
+                // プレビュー: canvasView のみ差し替え(Undo 登録しない)
+                isReplacingDrawing = true
+                container.canvasView.drawing = translatedDrawing(start, by: t)
+                isReplacingDrawing = false
+            case .ended:
+                guard let start = lassoMoveStartDrawing else { return }
+                replaceDrawingWithUndoSupport(container.canvasView, to: translatedDrawing(start, by: t), from: start)
+                lassoMoveStartDrawing = nil
+            case .cancelled, .failed:
+                if let start = lassoMoveStartDrawing {
+                    isReplacingDrawing = true
+                    container.canvasView.drawing = start
+                    isReplacingDrawing = false
+                }
+                lassoMoveStartDrawing = nil
+            default:
+                break
+            }
+        }
+
+        /// 統一枠の削除ボタンで選択ストロークを削除する(オブジェクト削除と同一イベント=1 Undo グループ)。
+        func deleteLassoStrokes(in container: CanvasContainerUIView) {
+            guard !lassoSelection.strokeIndices.isEmpty else { return }
+            let old = container.canvasView.drawing
+            var next = old
+            next.strokes = old.strokes.enumerated()
+                .filter { !lassoSelection.strokeIndices.contains($0.offset) }
+                .map(\.element)
+            replaceDrawingWithUndoSupport(container.canvasView, to: next, from: old)
+            lassoSelection.strokeIndices = []
+        }
+
         // MARK: - オブジェクト同期(要件③)
 
         @MainActor
@@ -990,8 +1149,38 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         didSet {
             guard isSelectMode != oldValue else { return }
             objectLayer.isSelectMode = isSelectMode
-            canvasView.panGestureRecognizer.minimumNumberOfTouches = isSelectMode ? 2 : 1
+            updateScrollTouchRequirement()
         }
+    }
+
+    /// 投げ縄選択モード(`.lasso` ツール中、infinite のみ)。単指=自前投げ縄、2指=スクロール。
+    var isLassoMode = false {
+        didSet {
+            guard isLassoMode != oldValue else { return }
+            lassoPan.isEnabled = isLassoMode
+            updateScrollTouchRequirement()
+            if !isLassoMode { objectLayer.clearLassoSelection() }
+        }
+    }
+
+    /// 選択/投げ縄中は単指ドラッグをオブジェクト操作・投げ縄に使うため、スクロールは2指に限定する。
+    private func updateScrollTouchRequirement() {
+        canvasView.panGestureRecognizer.minimumNumberOfTouches = (isSelectMode || isLassoMode) ? 2 : 1
+    }
+
+    /// 自前投げ縄の描画ジェスチャ(指・Pencil 両対応、単指)。isLassoMode 中のみ有効。
+    private lazy var lassoPan: UIPanGestureRecognizer = {
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleLassoPan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = self
+        pan.isEnabled = false
+        return pan
+    }()
+    /// 投げ縄ジェスチャの各段階を Coordinator へ渡す(Coordinator が objectLayer 空間で座標を読む)。
+    var onLassoPan: ((UIPanGestureRecognizer) -> Void)?
+
+    @objc private func handleLassoPan(_ gesture: UIPanGestureRecognizer) {
+        onLassoPan?(gesture)
     }
 
     override init(frame: CGRect) {
@@ -1029,6 +1218,7 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         // ノートリンクの「開く」ボタン上のタッチではストロークを始めさせない。
         drawingTouchGate.forward = canvasView.drawingGestureRecognizer.delegate
         canvasView.drawingGestureRecognizer.delegate = drawingTouchGate
+        canvasView.addGestureRecognizer(lassoPan)  // 自前投げ縄(isLassoMode 中のみ有効)
         addSubview(canvasView)
 
         // 背景 → オブジェクトの順でキャンバス最背面へ差し込む。
@@ -1077,6 +1267,10 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
             }
             return
         }
+        // 投げ縄選択中に「枠の外」をタップしたら選択解除(枠内・削除ボタンのタップは潰さない)
+        if objectLayer.hasLassoSelection, !objectLayer.lassoViewContains(contentPoint: point) {
+            objectLayer.clearLassoSelection()
+        }
         objectLayer.handleBackgroundTap(at: point)
     }
 
@@ -1084,6 +1278,15 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool { true }
+
+    /// 自前投げ縄は「空き領域(オブジェクト・投げ縄枠の上でない)」から始まったときだけ開始する。
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === lassoPan {
+            let point = lassoPan.location(in: objectLayer)
+            return !objectLayer.lassoShouldYield(atContentPoint: point)
+        }
+        return true
+    }
 }
 
 /// PKCanvasView の描画ジェスチャに差し込む delegate。ノートリンクの「開く」ボタン上で

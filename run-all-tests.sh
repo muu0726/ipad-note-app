@@ -133,6 +133,7 @@ GROUP_3_DESC="[Group 3: オブジェクト UI テスト] オブジェクト操�
 GROUP_3_TARGETS=(
   "InfiniteCanvasAppUITests/ObjectInteractionUITests"
   "InfiniteCanvasAppUITests/UnifiedSelectionUITests"
+  "InfiniteCanvasAppUITests/LassoSelectionUITests"
   "InfiniteCanvasAppUITests/FontSizeUITests"
   "InfiniteCanvasAppUITests/DragDropUITests"
   "InfiniteCanvasAppUITests/ShapeAssistUITests"

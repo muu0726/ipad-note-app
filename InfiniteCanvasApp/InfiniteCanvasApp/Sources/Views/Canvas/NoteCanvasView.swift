@@ -275,6 +275,7 @@ struct NoteCanvasView: View {
                 drawing: $drawing,
                 pkTool: toolState.pkTool,
                 isSelectMode: toolState.isSelectMode,
+                isLassoSelectionMode: toolState.tool == .lasso,
                 placementTool: toolState.tool.isPlacementTool ? toolState.tool : nil,
                 onPlaceObject: { tool, point in placeObjectItem(tool, at: point) },
                 isShapeAssistEnabled: toolState.isShapeAssistEnabled,

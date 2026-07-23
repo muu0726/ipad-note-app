@@ -70,6 +70,16 @@ final class ObjectLayerUIView: UIView {
     private var resizeStartFrames: [NSManagedObjectID: CGRect] = [:]
     private var resizeStartBox: CGRect = .zero
 
+    /// 自前投げ縄でインク+オブジェクトを一括選択したときのオーバーレイ(投げ縄パス+統一枠+削除)。
+    let lassoView = LassoSelectionView()
+    /// 投げ縄選択中は複数選択のリサイズ枠(selectionOverlay)を抑止する(統一枠は lassoView が担う)。
+    private var suppressResizeOverlay = false
+    /// 投げ縄選択のインク側(ストローク)の移動・削除を Coordinator へ委譲するクロージャ。
+    var onLassoStrokesMove: ((CGVector, UIGestureRecognizer.State) -> Void)?
+    var onLassoStrokesDelete: (() -> Void)?
+    /// 投げ縄選択のボックス移動開始時の基準ボックス。
+    private var lassoMoveStartBox: CGRect?
+
     /// グリッドスナップの有効判定に使う(白紙のときはグリッドへ吸着しない)
     var backgroundStyle: CanvasBackgroundStyle = .blank
 
@@ -99,6 +109,12 @@ final class ObjectLayerUIView: UIView {
             self?.resizeSelection(handle: handle, translation: translation, state: state)
         }
         addSubview(selectionOverlay)
+
+        lassoView.frame = bounds
+        lassoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        lassoView.onMove = { [weak self] t, state in self?.moveLassoSelection(t, state: state) }
+        lassoView.onDelete = { [weak self] in self?.deleteLassoSelection() }
+        addSubview(lassoView)
     }
 
     @available(*, unavailable)
@@ -113,6 +129,7 @@ final class ObjectLayerUIView: UIView {
         if !selectionOverlay.isHidden {
             selectionOverlay.update(box: selectionOverlay.box, zoom: zoom)
         }
+        lassoView.applyZoom(zoom)
     }
 
     // MARK: - モデル同期
@@ -143,6 +160,8 @@ final class ObjectLayerUIView: UIView {
             // 移動/リサイズでフレームが変わった選択に追従(操作中でなければ再計算)
             if resizeStartFrames.isEmpty { refreshSelectionOverlay() }
         }
+        // 投げ縄の統一枠も最前面に保つ
+        if !lassoView.isHidden { bringSubviewToFront(lassoView) }
     }
 
     // MARK: - 選択(単体・複数・グループ)
@@ -186,6 +205,8 @@ final class ObjectLayerUIView: UIView {
     /// 複数選択(非ロック2個以上)のとき統一枠を表示し、そうでなければ隠す。
     /// 単体選択は従来どおり各オブジェクトの右下ハンドルでリサイズする(枠は出さない)。
     private func refreshSelectionOverlay() {
+        // 投げ縄選択中は統一枠を lassoView が担うため、複数選択のリサイズ枠は出さない。
+        if suppressResizeOverlay { selectionOverlay.setActive(false); return }
         let frames = selectableSelectedFrames()
         guard frames.count >= 2, let box = SelectionGeometry.boundingBox(of: Array(frames.values)) else {
             selectionOverlay.setActive(false)
@@ -221,6 +242,72 @@ final class ObjectLayerUIView: UIView {
         default:
             break
         }
+    }
+
+    // MARK: - 自前投げ縄によるインク+オブジェクト一括選択
+
+    /// ドラッグ中の投げ縄パス(コンテンツ空間の頂点列)を描画する。
+    func updateLassoDrawing(points: [CGPoint]) {
+        bringSubviewToFront(lassoView)
+        lassoView.updateLassoPath(points)
+    }
+
+    /// 投げ縄確定: 囲んだオブジェクトを選択状態にし、統一枠(box=インク+オブジェクトの外接)を表示する。
+    /// リサイズ枠(selectionOverlay)は抑止し、統一枠は lassoView が担う。
+    func beginLassoSelection(objectIDs: Set<NSManagedObjectID>, box: CGRect) {
+        suppressResizeOverlay = true
+        setSelection(objectIDs)
+        lassoView.showSelection(box: box, zoom: zoom)
+        bringSubviewToFront(lassoView)
+    }
+
+    /// 投げ縄選択を解除する(選択解除・ツール変更・新しい投げ縄開始時)。
+    func clearLassoSelection() {
+        guard suppressResizeOverlay || !lassoView.isHidden else { return }
+        suppressResizeOverlay = false
+        lassoView.clear()
+        setSelection([])
+    }
+
+    /// 投げ縄選択中か。
+    var hasLassoSelection: Bool { !lassoView.isHidden && lassoView.box != nil }
+
+    /// コンテンツ座標が「投げ縄の当たり判定を横取りすべき要素(オブジェクト or 投げ縄枠)」の上か。
+    /// 自前投げ縄ジェスチャは、これが false(=空き領域)のときだけ開始する。
+    func lassoShouldYield(atContentPoint point: CGPoint) -> Bool {
+        if lassoViewContains(contentPoint: point) { return true }
+        for view in objectViews.values where view.frame.contains(point) { return true }
+        return false
+    }
+
+    /// コンテンツ座標が投げ縄の統一枠(ボックス内部 or 削除ボタン)の上か。
+    /// 背景タップでの選択解除は、これが false(=枠の外)のときだけ行う(削除ボタンのタップを潰さない)。
+    func lassoViewContains(contentPoint point: CGPoint) -> Bool {
+        !lassoView.isHidden && lassoView.point(inside: convert(point, to: lassoView), with: nil)
+    }
+
+    /// 統一枠ドラッグでインク+オブジェクトを一括移動する(オブジェクトは既存 moveSelection、インクは Coordinator)。
+    private func moveLassoSelection(_ t: CGVector, state: UIGestureRecognizer.State) {
+        switch state {
+        case .began:
+            lassoMoveStartBox = lassoView.box
+        case .changed:
+            if let start = lassoMoveStartBox {
+                lassoView.showSelection(box: start.offsetBy(dx: t.dx, dy: t.dy), zoom: zoom)
+            }
+        default:
+            break
+        }
+        moveSelection(translation: CGPoint(x: t.dx, y: t.dy), state: state)  // オブジェクト
+        onLassoStrokesMove?(t, state)                                        // インク(Coordinator)
+        if state == .ended || state == .cancelled || state == .failed { lassoMoveStartBox = nil }
+    }
+
+    /// 削除ボタンでインク+オブジェクトを一括削除する(同一イベントで1 Undo グループ)。
+    private func deleteLassoSelection() {
+        onLassoStrokesDelete?()  // インク(Coordinator)を先に
+        deleteSelection()        // オブジェクト
+        clearLassoSelection()
     }
 
     /// タップ選択: グループ化済みならグループ全体、そうでなければ単体を選択(置換)。
