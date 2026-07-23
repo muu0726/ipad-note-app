@@ -186,6 +186,7 @@ GROUP_8_TARGETS=(
 GROUP_9_DESC="[Group 9: フリーフォーム/システム UI テスト] キャンバスパン・ズーム、ストアリセット、全体ウォークスルー"
 GROUP_9_TARGETS=(
   "InfiniteCanvasAppUITests/InfiniteCanvasFreeformUITests"
+  "InfiniteCanvasAppUITests/ZoomToFitUITests"
   "InfiniteCanvasAppUITests/StoreResetUITests"
   "InfiniteCanvasAppUITests/AppWalkthroughUITests"
 )

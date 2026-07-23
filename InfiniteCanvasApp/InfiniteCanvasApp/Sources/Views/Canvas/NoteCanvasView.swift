@@ -41,6 +41,8 @@ struct NoteCanvasView: View {
     @State private var scrollToPage: Int?
     /// ズームを 100% に戻す要求(左上バッジのメニューから)
     @State private var resetZoomRequested = false
+    /// コンテンツ全体を画面に収める(Zoom to Fit)要求(左上バッジのメニューから)
+    @State private var zoomToFitRequested = false
     /// 現在のズーム倍率(表示用)
     @State private var currentZoomScale: CGFloat = 1.0
     /// ズームロック: true のときピンチズームを禁止する
@@ -314,7 +316,9 @@ struct NoteCanvasView: View {
                 scrollToPage: scrollToPage,
                 onScrollHandled: { scrollToPage = nil },
                 resetZoomRequested: resetZoomRequested,
-                onZoomResetHandled: { resetZoomRequested = false }
+                onZoomResetHandled: { resetZoomRequested = false },
+                zoomToFitRequested: zoomToFitRequested,
+                onZoomToFitHandled: { zoomToFitRequested = false }
             )
         }
     }
@@ -506,6 +510,14 @@ struct NoteCanvasView: View {
                     resetZoomRequested = true
                 } label: {
                     Label("100%に戻す", systemImage: "1.magnifyingglass")
+                }
+                if note.canvasNoteType == .infinite {
+                    Button {
+                        zoomToFitRequested = true
+                    } label: {
+                        Label("全体表示", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+                    }
+                    .accessibilityIdentifier("canvas-zoom-fit")
                 }
             } label: {
                 Text("\(Int((currentZoomScale * 100).rounded()))%")

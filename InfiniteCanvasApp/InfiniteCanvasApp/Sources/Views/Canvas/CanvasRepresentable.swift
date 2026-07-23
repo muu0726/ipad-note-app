@@ -168,6 +168,10 @@ struct CanvasRepresentable: UIViewRepresentable {
     let resetZoomRequested: Bool
     /// リセットを処理したら呼ぶ(要求元が false へ戻す)
     let onZoomResetHandled: () -> Void
+    /// コンテンツ全体を画面に収める(Zoom to Fit)要求(左上バッジのメニューから、infinite のみ)。
+    let zoomToFitRequested: Bool
+    /// 全体表示を処理したら呼ぶ(要求元が false へ戻す)
+    let onZoomToFitHandled: () -> Void
 
     /// 通常ノートのページ配置電卓(見開き × スクロール方向)
     private var layout: PagedLayoutCalculator {
@@ -547,6 +551,26 @@ struct CanvasRepresentable: UIViewRepresentable {
                 container.objectLayer.applyZoom(1.0)
                 container.patternView.applyZoom(1.0)
                 self.onZoomResetHandled()
+            }
+        }
+
+        // コンテンツ全体を画面に収める(Zoom to Fit、infinite のみ)
+        if zoomToFitRequested, noteType == .infinite {
+            DispatchQueue.main.async {
+                context.coordinator.refreshInfiniteWorld(in: container)
+                if let fit = ZoomToFit.fit(
+                    contentUnion: infiniteContentUnion, viewportSize: canvas.bounds.size,
+                    minZoom: canvas.minimumZoomScale, maxZoom: canvas.maximumZoomScale
+                ) {
+                    UIView.animate(withDuration: 0.3) {
+                        canvas.zoomScale = fit.zoomScale
+                        context.coordinator.refreshInfiniteWorld(in: container)
+                        canvas.contentOffset = context.coordinator.clampedInfiniteOffset(fit.contentOffset, for: canvas)
+                        container.objectLayer.applyZoom(fit.zoomScale)
+                        container.patternView.applyZoom(fit.zoomScale)
+                    }
+                }
+                self.onZoomToFitHandled()
             }
         }
 
