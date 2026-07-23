@@ -1038,7 +1038,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         // サムネイルは渡さない(image は nil のまま)。
                         linkTitle = object.resolvedLinkedNote?.displayTitle ?? ""
                     } else if object.objectKind != .text && object.objectKind != .todo
-                                && object.objectKind != .shape && object.objectKind != .table {
+                                && object.objectKind != .shape && object.objectKind != .table
+                                && object.objectKind != .stickyNote {
                         if let cached = imageCache[object.objectID] {
                             image = cached
                         } else if let rendered = object.makeDisplayImage() {
@@ -1059,7 +1060,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         linkTitle: linkTitle,
                         todoItems: object.objectKind == .todo ? object.todoItems : [],
                         shapePayload: object.objectKind == .shape ? object.shapePayload : nil,
-                        tablePayload: object.objectKind == .table ? object.tablePayload : nil
+                        tablePayload: object.objectKind == .table ? object.tablePayload : nil,
+                        stickyNotePayload: object.objectKind == .stickyNote ? object.stickyNotePayload : nil
                     )
                 }
             layer.sync(items: items)

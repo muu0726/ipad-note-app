@@ -20,6 +20,7 @@ struct CanvasObjectItem {
     var todoItems: [TodoItem] = []  // todo: チェックリストの項目
     var shapePayload: ShapePayload? = nil  // shape: 図形パラメータ
     var tablePayload: TablePayload? = nil  // table: 表の構造
+    var stickyNotePayload: StickyNotePayload? = nil  // stickyNote: 付箋の色
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -577,6 +578,24 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             }
             tableView.payload = item.tablePayload
             addSubview(tableView)
+        case .stickyNote:
+            let color = item.stickyNotePayload?.color ?? .yellow
+            backgroundColor = color.backgroundUIColor
+            layer.cornerRadius = 8
+            layer.shadowColor = UIColor.black.cgColor
+            layer.shadowOpacity = 0.2
+            layer.shadowRadius = 5
+            layer.shadowOffset = CGSize(width: 0, height: 3)
+            textView.isScrollEnabled = false
+            textView.backgroundColor = .clear
+            textView.textColor = color.textUIColor
+            textView.textAlignment = .center
+            textView.isEditable = false
+            textView.isUserInteractionEnabled = false  // 編集開始まで自分がタッチを受ける
+            textView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+            textView.delegate = self
+            addSubview(textView)
+            updateTextAccessibility()
         }
 
         // 選択チップ: リサイズハンドル(右下)。角に半分かかる配置
@@ -649,6 +668,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // 表はセルのダブルタップでそのセルのテキスト編集に入る。
         if kind == .table {
             let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleTableCellDoubleTap(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            doubleTap.allowedTouchTypes = fingerOnly
+            addGestureRecognizer(doubleTap)
+            tap.require(toFail: doubleTap)
+        }
+
+        // 付箋はダブルタップで即座にテキスト入力に入る(要件: 付箋)。
+        if kind == .stickyNote {
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleStickyEditDoubleTap))
             doubleTap.numberOfTapsRequired = 2
             doubleTap.allowedTouchTypes = fingerOnly
             addGestureRecognizer(doubleTap)
@@ -729,6 +757,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
         lockBadge.frame = CGRect(x: bounds.width - 11, y: -11, width: 22, height: 22)  // 右上の角
 
+        if kind == .stickyNote {
+            // 影のパスを角丸に合わせる(perf)+ 文字が枠に収まるようフォントを自動調整
+            layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
+            fitStickyFont()
+        }
+
         if kind == .noteLink {
             linkCard.frame = bounds
             linkCard.layer.shadowPath = UIBezierPath(
@@ -782,10 +816,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             configureLockState()
             refreshSelectionChrome()  // ロック中はリサイズハンドルを出さない(選択枠は残す)
         }
-        if kind == .text, !textView.isFirstResponder, textView.text != item.text {
+        if (kind == .text || kind == .stickyNote), !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
-        if kind == .text { updateTextAccessibility() }
+        if kind == .stickyNote {
+            backgroundColor = (item.stickyNotePayload?.color ?? .yellow).backgroundUIColor
+            textView.textColor = (item.stickyNotePayload?.color ?? .yellow).textUIColor
+            setNeedsLayout()  // フォント自動調整
+        }
+        if kind == .text || kind == .stickyNote { updateTextAccessibility() }
         // 編集中はビュー側が真値なので上書きしない(テキストと同様のガード)
         if kind == .todo, !todoListView.isEditing {
             todoListView.setItems(item.todoItems)
@@ -907,10 +946,29 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// テキストを accessibility value として公開しなくなる(選択解除後に要素が value 検索で
     /// 見つからなくなる)。ここで identifier と value を明示して常時参照可能にする。
     private func updateTextAccessibility() {
-        guard kind == .text else { return }
+        guard kind == .text || kind == .stickyNote else { return }
         textView.isAccessibilityElement = true
-        textView.accessibilityIdentifier = "canvas-object-text"
+        textView.accessibilityIdentifier = kind == .stickyNote ? "canvas-object-sticky" : "canvas-object-text"
         textView.accessibilityValue = textView.text
+    }
+
+    /// 付箋: 文字が枠に収まる最大フォント(12〜40pt)へ自動調整する(要件: 自動フォントサイズ)。
+    private func fitStickyFont() {
+        guard kind == .stickyNote else { return }
+        let maxW = bounds.width - 20, maxH = bounds.height - 20
+        guard maxW > 0, maxH > 0 else { return }
+        let text = textView.text ?? ""
+        var size: CGFloat = 40
+        let minSize: CGFloat = 12
+        while size > minSize {
+            let bounding = (text as NSString).boundingRect(
+                with: CGSize(width: maxW, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: UIFont.systemFont(ofSize: size)], context: nil)
+            if bounding.height <= maxH { break }
+            size -= 2
+        }
+        if textView.font?.pointSize != size { textView.font = .systemFont(ofSize: size) }
     }
 
     // MARK: - テキスト編集
@@ -918,7 +976,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     func beginTextEditing() {
         guard !isUserLocked else { return }  // ロック中は編集不可
         switch kind {
-        case .text:
+        case .text, .stickyNote:
             textView.isEditable = true
             textView.isUserInteractionEnabled = true
             textView.becomeFirstResponder()
@@ -930,7 +988,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     private func endTextEditing() {
-        if kind == .text, textView.isFirstResponder {
+        if (kind == .text || kind == .stickyNote), textView.isFirstResponder {
             // 入力内容を resignFirstResponder より先に永続化する。
             // resign から textViewDidEndEditing までの間に選択変更由来の再描画で
             // apply(_:) が走ると、まだ空のモデル値で入力済みテキストを上書き消去して
@@ -945,6 +1003,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     func textViewDidChange(_ textView: UITextView) {
+        // 付箋はサイズ固定でフォントを自動調整する(高さは変えない)。
+        if kind == .stickyNote {
+            fitStickyFont()
+            updateTextAccessibility()
+            return
+        }
         // 入力に合わせて高さを自動拡張。テキストはコンテンツ空間のフォントサイズなので
         // sizeThatFits の結果はそのままコンテンツ空間の高さになる(ズーム換算は不要)
         let fitting = textView.sizeThatFits(
@@ -972,8 +1036,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // 指タップはツールに関係なくオブジェクトを選択できる(hitTest が指タッチを通す)。
         guard let layerView else { return }
         if layerView.selectedID == objectID {
-            // 単体選択中の再タップ → テキスト/Todoを編集開始
-            if kind == .text || kind == .todo { beginTextEditing() }
+            // 単体選択中の再タップ → テキスト/Todo/付箋を編集開始
+            if kind == .text || kind == .todo || kind == .stickyNote { beginTextEditing() }
         } else {
             // グループ化済みならグループ全体、そうでなければ単体を選択
             layerView.selectTapped(objectID)
@@ -991,6 +1055,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         guard let layerView, kind == .shape else { return }
         if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
         layerView.onShapeEdit?(objectID)
+    }
+
+    /// 付箋のダブルタップ → 選択したうえで即座にテキスト入力へ入る。
+    @objc private func handleStickyEditDoubleTap() {
+        guard let layerView, kind == .stickyNote else { return }
+        if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
+        beginTextEditing()
     }
 
     /// 表のダブルタップ → 選択したうえで、タップしたセルのテキスト編集に入る。

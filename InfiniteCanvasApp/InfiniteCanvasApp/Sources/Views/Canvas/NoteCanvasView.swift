@@ -12,6 +12,7 @@ enum ObjectInsertion: Equatable {
     case todo            // チェックリスト
     case shape(ShapeType)  // 図形(矩形・楕円・三角・直線・矢印・星)
     case table(rows: Int, cols: Int)  // 表(Excel風)
+    case stickyNote(StickyNoteColor)  // 付箋(カラー付き)
 }
 
 /// 1つのノートの無限キャンバス。
@@ -1070,6 +1071,13 @@ struct NoteCanvasView: View {
                 x: center.x - size.width / 2, y: center.y - size.height / 2,
                 width: size.width, height: size.height
             )
+        case .stickyNote(let color):
+            object.kind = CanvasObjectKind.stickyNote.rawValue
+            object.text = ""
+            object.fontSize = 20
+            object.stickyNotePayload = StickyNotePayload(color: color)
+            // 正方形に近い付箋(180×180)をタップ/ビューポート中心に配置。
+            object.contentFrame = CGRect(x: center.x - 90, y: center.y - 90, width: 180, height: 180)
         }
 
         // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる

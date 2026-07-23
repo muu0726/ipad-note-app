@@ -15,6 +15,8 @@ struct PenToolbarView: View {
     var onInsertPDF: () -> Void = {}
     var onInsertNoteLink: () -> Void = {}
     var onInsertTodo: () -> Void = {}
+    /// 付箋を挿入する(色を指定)。
+    var onInsertStickyNote: (StickyNoteColor) -> Void = { _ in }
     /// ライブラリ一覧へ戻る(タブ・分割は維持したまま)。
     var onOpenLibrary: () -> Void = {}
     /// 選択中テキストのフォントサイズ変更(新しい絶対サイズを渡す)
@@ -565,6 +567,20 @@ struct PenToolbarView: View {
                 Label("図形", systemImage: "square.on.circle")
             }
             .accessibilityIdentifier("toolbar-insert-shape")
+            // 付箋: 6色から選んで即挿入(ビューポート中央に配置)
+            Menu {
+                ForEach(StickyNoteColor.allCases, id: \.self) { color in
+                    Button {
+                        onInsertStickyNote(color)
+                    } label: {
+                        Label(color.displayName, systemImage: "square.fill")
+                    }
+                    .accessibilityIdentifier("toolbar-sticky-\(color.rawValue)")
+                }
+            } label: {
+                Label("付箋", systemImage: "note.text")
+            }
+            .accessibilityIdentifier("toolbar-insert-sticky")
             // 表: グリッドピッカーで行×列を指定して配置モードへ
             Button {
                 showTableGridPicker = true
