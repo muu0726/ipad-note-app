@@ -10,6 +10,16 @@ enum CanvasObjectKind: String {
     case shape     // 図形(矩形・楕円・三角・直線・矢印・星)
     case table     // 表(Excel風・可変列幅/行高)
     case stickyNote  // 付箋(カラー・角丸・影・ダブルタップ編集)
+    case connector   // 2オブジェクトを結ぶ自動追従コネクタ線
+}
+
+/// コネクタ線のパラメータ。payload に JSON で保存する。
+/// 接続先はオブジェクトの UUID 文字列で参照し、位置は描画時に都度解決する
+/// (既存の linkedNoteUUID と同じ「UUID参照+都度解決」パターン)。
+struct ConnectorPayload: Codable, Equatable {
+    var sourceID: String  // 接続元オブジェクトの UUID
+    var targetID: String  // 接続先オブジェクトの UUID
+    var hasArrow: Bool = true
 }
 
 /// 付箋の色(Freeform 準拠の6色)。payload の StickyNotePayload に保持する。
@@ -228,6 +238,12 @@ extension CanvasObject {
         set { payload = newValue.flatMap { try? JSONEncoder().encode($0) } }
     }
 
+    /// コネクタ線のパラメータ。payload に JSON で保存する(未設定は nil)
+    var connectorPayload: ConnectorPayload? {
+        get { payload.flatMap { try? JSONDecoder().decode(ConnectorPayload.self, from: $0) } }
+        set { payload = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
     /// ノートリンクの場合、リンク先の NoteFile を UUID から引く(ゴミ箱・削除済みは nil)
     var resolvedLinkedNote: NoteFile? {
         guard objectKind == .noteLink,
@@ -291,6 +307,8 @@ extension CanvasObject {
                     .foregroundColor: color.textUIColor,
                 ]
             )
+        case .connector:
+            break  // コネクタは接続先の位置に依存するためサムネイルには描かない
         case .shape:
             guard let shape = shapePayload else { break }
             let lw = max(0.5, shape.lineWidth)
@@ -366,7 +384,7 @@ extension CanvasObject {
                 of: CGSize(width: box.width * scale, height: box.height * scale),
                 for: .mediaBox
             )
-        case .text, .noteLink, .todo, .shape, .table, .stickyNote:
+        case .text, .noteLink, .todo, .shape, .table, .stickyNote, .connector:
             return nil
         }
     }

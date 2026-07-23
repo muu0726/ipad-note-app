@@ -310,6 +310,7 @@ struct NoteCanvasView: View {
                 onToggleUserLock: { id in toggleUserLock(objectID: id) },
                 onGroupObjects: { ids in groupObjects(ids) },
                 onUngroupObjects: { ids in ungroupObjects(ids) },
+                onConnectObjects: { ids in connectObjects(ids) },
                 onAppendPage: { addPage() },
                 onSelectionChanged: { handleSelectionChanged($0) },
                 onCanvasReady: { undoBridge.attach($0) },
@@ -941,6 +942,34 @@ struct NoteCanvasView: View {
             object.updatedAt = .now
         }
         persist()
+    }
+
+    /// 選択中の2オブジェクトをコネクタ線で接続する(接続元/先の UUID を保存・Undo あり)。
+    /// 端点の移動・リサイズには描画時に都度追従する。端点が消えると自動的に描かれなくなる。
+    private func connectObjects(_ ids: [NSManagedObjectID]) {
+        guard ids.count == 2 else { return }
+        onActivate()
+        guard let a = (try? context.existingObject(with: ids[0])) as? CanvasObject,
+              let b = (try? context.existingObject(with: ids[1])) as? CanvasObject,
+              a.objectKind != .connector, b.objectKind != .connector,
+              let aUUID = a.id?.uuidString, let bUUID = b.id?.uuidString else { return }
+        let object = CanvasObject(context: context)
+        object.id = UUID()
+        object.createdAt = .now
+        object.updatedAt = .now
+        object.note = note
+        object.zOrder = (objects.last?.zOrder ?? 0) + 1
+        object.kind = CanvasObjectKind.connector.rawValue
+        object.connectorPayload = ConnectorPayload(sourceID: aUUID, targetID: bUUID, hasArrow: true)
+        object.contentFrame = a.contentFrame.union(b.contentFrame)  // 参考値(実表示は端点から都度算出)
+        try? context.obtainPermanentIDs(for: [object])
+        persist()
+        if let uuid = object.id {
+            CanvasObjectUndo.registerInsert(
+                objectUUID: uuid, in: undoBridge.activeUndoManager,
+                context: context, bridge: undoBridge
+            )
+        }
     }
 
     /// グループを解除する(渡された全 ID の parentGroupID を消す)

@@ -54,6 +54,8 @@ final class ObjectLayerUIView: UIView {
     var onGroupObjects: (([NSManagedObjectID]) -> Void)?
     /// グループを解除する要求(渡された全 ID の parentGroupID を消す)
     var onUngroupObjects: (([NSManagedObjectID]) -> Void)?
+    /// 選択中の2オブジェクトをコネクタ線で接続する要求
+    var onConnectObjects: (([NSManagedObjectID]) -> Void)?
 
     /// 現在のズーム倍率。オブジェクトはコンテンツ空間に直接配置され、スクロール/ズーム追従は
     /// スクロールビュー(PKCanvasView)の合成に任せるため、この値はスナップ閾値・タッチ判定の
@@ -64,6 +66,10 @@ final class ObjectLayerUIView: UIView {
     /// 単体選択のときだけその ID(テキストツールバー表示・リサイズ・再タップ編集の判定に使う)
     var selectedID: NSManagedObjectID? { selectedIDs.count == 1 ? selectedIDs.first : nil }
     private var objectViews: [NSManagedObjectID: CanvasObjectUIView] = [:]
+    /// コネクタ線(2オブジェクトを結ぶ自動追従線)。オブジェクトの下に置く。
+    private var connectorViews: [NSManagedObjectID: ConnectorLineView] = [:]
+    /// コネクタ id → (接続元, 接続先, 矢印)。ドラッグ中に端点をライブ再計算するために保持する。
+    private var connectorEndpoints: [NSManagedObjectID: (source: NSManagedObjectID, target: NSManagedObjectID, hasArrow: Bool)] = [:]
     private let guideLayer = CAShapeLayer()
     /// 複数選択(2個以上)時に出す統一バウンディングボックス + 8方向リサイズハンドル。
     private let selectionOverlay = SelectionOverlayView()
@@ -131,6 +137,7 @@ final class ObjectLayerUIView: UIView {
             selectionOverlay.update(box: selectionOverlay.box, zoom: zoom)
         }
         lassoView.applyZoom(zoom)
+        for view in connectorViews.values { view.applyZoom(zoom) }
     }
 
     // MARK: - モデル同期
@@ -163,6 +170,43 @@ final class ObjectLayerUIView: UIView {
         }
         // 投げ縄の統一枠も最前面に保つ
         if !lassoView.isHidden { bringSubviewToFront(lassoView) }
+        // コネクタ線は常にオブジェクトの背面へ
+        for view in connectorViews.values { sendSubviewToBack(view) }
+    }
+
+    /// コネクタ線を接続元/先の現在位置に合わせて同期する(Coordinator が端点を算出して渡す)。
+    func syncConnectors(_ specs: [ConnectorLineSpec]) {
+        let ids = Set(specs.map(\.id))
+        for (id, view) in connectorViews where !ids.contains(id) {
+            view.removeFromSuperview()
+            connectorViews[id] = nil
+            connectorEndpoints[id] = nil
+        }
+        for spec in specs {
+            let view: ConnectorLineView
+            if let existing = connectorViews[spec.id] {
+                view = existing
+            } else {
+                view = ConnectorLineView()
+                connectorViews[spec.id] = view
+                addSubview(view)
+            }
+            connectorEndpoints[spec.id] = (spec.sourceObjectID, spec.targetObjectID, spec.hasArrow)
+            view.update(start: spec.start, end: spec.end, hasArrow: spec.hasArrow, zoom: zoom)
+            sendSubviewToBack(view)  // 線はオブジェクトの下
+        }
+    }
+
+    /// ドラッグ中に、接続元/先オブジェクトの現在フレームからコネクタ端点をライブ再計算する(自動追従)。
+    func refreshConnectorPositions() {
+        guard !connectorEndpoints.isEmpty else { return }
+        for (id, ends) in connectorEndpoints {
+            guard let view = connectorViews[id],
+                  let source = objectViews[ends.source]?.contentFrame,
+                  let target = objectViews[ends.target]?.contentFrame else { continue }
+            let (start, end) = ConnectorGeometry.endpoints(source: source, target: target)
+            view.update(start: start, end: end, hasArrow: ends.hasArrow, zoom: zoom)
+        }
     }
 
     // MARK: - 選択(単体・複数・グループ)
@@ -232,6 +276,7 @@ final class ObjectLayerUIView: UIView {
             for (id, start) in resizeStartFrames {
                 objectViews[id]?.moveContentFrame(to: SelectionGeometry.rescale(start, from: resizeStartBox, to: newBox))
             }
+            refreshConnectorPositions()  // コネクタを追従
             selectionOverlay.update(box: newBox, zoom: zoom)
         case .ended, .cancelled, .failed:
             for (id, _) in resizeStartFrames {
@@ -360,6 +405,7 @@ final class ObjectLayerUIView: UIView {
             for (id, start) in groupMoveStart {
                 objectViews[id]?.moveContentFrame(to: start.offsetBy(dx: t.x, dy: t.y))
             }
+            refreshConnectorPositions()  // コネクタを追従
             if !selectionOverlay.isHidden,
                let box = SelectionGeometry.boundingBox(of: Array(selectableSelectedFrames().values)) {
                 selectionOverlay.update(box: box, zoom: zoom)
@@ -596,6 +642,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             textView.delegate = self
             addSubview(textView)
             updateTextAccessibility()
+        case .connector:
+            break  // コネクタは枠付きビューにならない(ConnectorLineView で線として描く)
         }
 
         // 選択チップ: リサイズハンドル(右下)。角に半分かかる配置
@@ -1094,6 +1142,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             contentFrame = result.frame
             layerView.showGuides(result.guides)
             applyPlacement()
+            layerView.refreshConnectorPositions()  // コネクタを追従
         case .ended, .cancelled, .failed:
             isInteracting = false
             layerView.showGuides([])
@@ -1134,6 +1183,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             }
             contentFrame.size = CGSize(width: newWidth, height: newHeight)
             applyPlacement()
+            layerView.refreshConnectorPositions()  // コネクタを追従
         case .ended, .cancelled, .failed:
             isInteracting = false
             // リサイズ中に行の増減があると、todoListView.onHeightChanged は
@@ -1186,6 +1236,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         } else if multi {
             actions.append(UIAction(title: "グループ化", image: UIImage(systemName: "square.on.square")) {
                 [weak self] _ in self?.layerView?.onGroupObjects?(ids)
+            })
+        }
+        // ちょうど2つ選択しているとき、コネクタ線で接続できる(接続導線が有効なノートのみ)。
+        if ids.count == 2, layerView.onConnectObjects != nil {
+            actions.append(UIAction(title: "コネクタで接続", image: UIImage(systemName: "point.topleft.down.to.point.bottomright.curvepath")) {
+                [weak self] _ in self?.layerView?.onConnectObjects?(ids)
             })
         }
         if !multi {

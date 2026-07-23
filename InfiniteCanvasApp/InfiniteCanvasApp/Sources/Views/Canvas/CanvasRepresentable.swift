@@ -153,6 +153,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onGroupObjects: ([NSManagedObjectID]) -> Void
     /// グループを解除する要求
     let onUngroupObjects: ([NSManagedObjectID]) -> Void
+    /// 選択中の2オブジェクトをコネクタ線で接続する要求
+    let onConnectObjects: ([NSManagedObjectID]) -> Void
     /// 通常ノートで、最後のページを超えて横に引っ張ったときにページを1枚追加する要求
     let onAppendPage: () -> Void
     /// オブジェクトの選択状態が変わったとき(true=何か選択中 / false=未選択)。
@@ -325,6 +327,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         }
         container.objectLayer.onUngroupObjects = { [weak coordinator] ids in
             coordinator?.parent.onUngroupObjects(ids)
+        }
+        container.objectLayer.onConnectObjects = { [weak coordinator] ids in
+            coordinator?.parent.onConnectObjects(ids)
         }
         // 選択状態の変化を SwiftUI(PenToolState.isSelectMode)へ伝える。
         // これが選択モード(描画停止・単指操作)の真実のソースになる。
@@ -968,10 +973,11 @@ struct CanvasRepresentable: UIViewRepresentable {
                 }
             }
 
-            // オブジェクト: 中心が内側のものを選ぶ
+            // オブジェクト: 中心が内側のものを選ぶ(コネクタは位置が派生値のため除外)
             var objectIDs: Set<NSManagedObjectID> = []
             var objectFrames: [CGRect] = []
-            for object in parent.objects where !object.isDeleted && object.managedObjectContext != nil {
+            for object in parent.objects
+            where !object.isDeleted && object.managedObjectContext != nil && object.objectKind != .connector {
                 let frame = object.contentFrame
                 if LassoHitTesting.rectIsSelected(frame, inside: polygon) {
                     objectIDs.insert(object.objectID); objectFrames.append(frame)
@@ -1051,7 +1057,10 @@ struct CanvasRepresentable: UIViewRepresentable {
         @MainActor
         func syncObjects(into layer: ObjectLayerUIView) {
             let activeObjects = parent.objects.filter { !$0.isDeleted && $0.managedObjectContext != nil }
-            let items = activeObjects
+            // コネクタは枠付きビューではなく線として別描画するため、通常オブジェクトから分離する。
+            let framedObjects = activeObjects.filter { $0.objectKind != .connector }
+            syncConnectorLines(from: activeObjects, into: layer)
+            let items = framedObjects
                 .sorted { $0.zOrder < $1.zOrder }
                 .map { object -> CanvasObjectItem in
                     var image: UIImage?
@@ -1093,6 +1102,35 @@ struct CanvasRepresentable: UIViewRepresentable {
             // 削除済みオブジェクトの画像キャッシュを解放する(imageCache がメモリリークしないように)
             let activeIDs = Set(activeObjects.map(\.objectID))
             imageCache = imageCache.filter { activeIDs.contains($0.key) }
+        }
+
+        /// コネクタ線を接続元/先の現在位置から算出してレイヤーへ渡す。
+        /// 接続元/先の UUID を frame に解決し、`ConnectorGeometry` で端点を求める。
+        /// どちらかの端点が欠けているコネクタは描かない(移動追従・削除追従はこれで成立する)。
+        @MainActor
+        private func syncConnectorLines(from objects: [CanvasObject], into layer: ObjectLayerUIView) {
+            var frameByUUID: [String: CGRect] = [:]
+            var objectByUUID: [String: NSManagedObjectID] = [:]
+            for object in objects where object.objectKind != .connector {
+                if let uuid = object.id?.uuidString {
+                    frameByUUID[uuid] = object.contentFrame
+                    objectByUUID[uuid] = object.objectID
+                }
+            }
+            var specs: [ConnectorLineSpec] = []
+            for object in objects where object.objectKind == .connector {
+                guard let payload = object.connectorPayload,
+                      let source = frameByUUID[payload.sourceID],
+                      let target = frameByUUID[payload.targetID] else { continue }
+                guard let sourceObj = objectByUUID[payload.sourceID],
+                      let targetObj = objectByUUID[payload.targetID] else { continue }
+                let (start, end) = ConnectorGeometry.endpoints(source: source, target: target)
+                specs.append(ConnectorLineSpec(
+                    id: object.objectID, sourceObjectID: sourceObj, targetObjectID: targetObj,
+                    start: start, end: end, hasArrow: payload.hasArrow
+                ))
+            }
+            layer.syncConnectors(specs)
         }
 
         /// 挿入直後のオブジェクトを選択し、テキストなら編集を開始する(1回だけ)
