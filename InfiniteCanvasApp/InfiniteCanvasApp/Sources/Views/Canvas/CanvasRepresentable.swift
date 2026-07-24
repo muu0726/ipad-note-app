@@ -1386,6 +1386,11 @@ final class DrawingTouchGate: NSObject, UIGestureRecognizerDelegate {
             let contentPoint = Self.contentPoint(fromRaw: rawPoint, zoomScale: zoomScale)
             if !isTouchAllowed(contentPoint) { return false }
         }
+        // Apple Pencil(=非 direct)は、オブジェクトの上・近傍でも常に描けるようにする。
+        // PencilKit 既定 delegate(forward)は hitTest がオブジェクト(サブビュー)に当たる
+        // タッチを弾くことがあり、オブジェクト周辺に「描き始められない領域」が生じるため、
+        // Pencil は forward に委ねず許可する(注釈を上から描ける = Freeform 同等)。
+        if touch.type != .direct { return true }
         return forward?.gestureRecognizer?(gestureRecognizer, shouldReceive: touch) ?? true
     }
 
