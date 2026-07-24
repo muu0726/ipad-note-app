@@ -136,6 +136,7 @@ GROUP_3_TARGETS=(
   "InfiniteCanvasAppUITests/LassoSelectionUITests"
   "InfiniteCanvasAppUITests/StickyNoteUITests"
   "InfiniteCanvasAppUITests/ConnectorUITests"
+  "InfiniteCanvasAppUITests/RotationUITests"
   "InfiniteCanvasAppUITests/FontSizeUITests"
   "InfiniteCanvasAppUITests/DragDropUITests"
   "InfiniteCanvasAppUITests/ShapeAssistUITests"

@@ -124,6 +124,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onDrawingChanged: () -> Void
     let onViewportChanged: (CanvasViewport) -> Void
     let onObjectFrameChanged: (NSManagedObjectID, CGRect) -> Void
+    /// 回転確定の保存(rotation 角・Undo あり)
+    let onObjectRotationChanged: (NSManagedObjectID, CGFloat) -> Void
     let onObjectTextChanged: (NSManagedObjectID, String) -> Void
     /// Todoリストの項目変更の保存(Undo あり)
     let onObjectTodoChanged: (NSManagedObjectID, [TodoItem]) -> Void
@@ -291,6 +293,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         let coordinator = context.coordinator
         container.objectLayer.onFrameChanged = { [weak coordinator] id, frame in
             coordinator?.parent.onObjectFrameChanged(id, frame)
+        }
+        container.objectLayer.onRotationChanged = { [weak coordinator] id, rotation in
+            coordinator?.parent.onObjectRotationChanged(id, rotation)
         }
         container.objectLayer.onTextChanged = { [weak coordinator] id, text in
             coordinator?.parent.onObjectTextChanged(id, text)
@@ -1085,6 +1090,7 @@ struct CanvasRepresentable: UIViewRepresentable {
                         frame: object.contentFrame,
                         text: object.text ?? "",
                         fontSize: object.fontSize > 0 ? object.fontSize : 24,
+                        rotation: object.rotation,
                         image: image,
                         isLocked: object.isLocked,
                         isUserLocked: object.isUserLocked,

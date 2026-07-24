@@ -9,9 +9,10 @@ final class NoteLinkOpenButton: UIButton {}
 struct CanvasObjectItem {
     let id: NSManagedObjectID
     let kind: CanvasObjectKind
-    var frame: CGRect        // コンテンツ空間
+    var frame: CGRect        // コンテンツ空間(回転前の論理フレーム)
     var text: String
     var fontSize: CGFloat
+    var rotation: CGFloat = 0  // 回転角(ラジアン)
     var image: UIImage?      // image / pdf のレンダリング済み画像(noteLink ではサムネイル)
     var isLocked: Bool = false  // システムロック(PDF 背景など): 完全非対話
     var isUserLocked: Bool = false  // ユーザーロック: 選択可・南京錠・移動/リサイズ/削除/編集不可
@@ -30,6 +31,8 @@ struct CanvasObjectItem {
 final class ObjectLayerUIView: UIView {
     // Core Data への書き戻しは Coordinator 経由で行う
     var onFrameChanged: ((NSManagedObjectID, CGRect) -> Void)?
+    /// 回転確定時の書き戻し(rotation 角・Undo あり)
+    var onRotationChanged: ((NSManagedObjectID, CGFloat) -> Void)?
     var onTextChanged: ((NSManagedObjectID, String) -> Void)?
     /// Todoリストの項目が変わったときの書き戻し
     var onTodoChanged: ((NSManagedObjectID, [TodoItem]) -> Void)?
@@ -532,8 +535,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
     private weak var layerView: ObjectLayerUIView?
     private var fontSize: CGFloat
+    /// 回転角(ラジアン)。描画時に center 周りの CGAffineTransform として適用する。
+    private var rotation: CGFloat
     private var isSelected = false
     private var gestureStartFrame: CGRect = .zero
+    /// 回転開始時の角度(ジェスチャの差分計算用)
+    private var rotationGestureStart: CGFloat = 0
     /// 移動用パン。選択済みのときだけ開始させる判定(gestureRecognizerShouldBegin)に使う
     private weak var movePan: UIPanGestureRecognizer?
 
@@ -543,6 +550,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private let shapeView = ShapeContentView()
     private let tableView = TableObjectContentView()
     private let resizeHandle = UIView()
+    /// 単一選択時に上へ出す回転ハンドル
+    private let rotateHandle = UIView()
     /// ユーザーロック中に隅へ出す南京錠バッジ(タップで解除)
     private let lockBadge = UIButton(type: .system)
     private lazy var editMenuInteraction = UIEditMenuInteraction(delegate: self)
@@ -563,6 +572,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         self.parentGroupID = item.parentGroupID
         self.contentFrame = item.frame
         self.fontSize = item.fontSize
+        self.rotation = item.rotation
         self.layerView = layerView
         super.init(frame: .zero)
         // システムロック(PDF背景など)は移動・リサイズ・選択・削除・編集を一切受け付けない。
@@ -654,6 +664,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.isHidden = true
         addSubview(resizeHandle)
 
+        // 回転ハンドル(上辺の上)。単一選択時のみ表示。
+        rotateHandle.backgroundColor = .systemBlue
+        rotateHandle.layer.cornerRadius = 11
+        rotateHandle.layer.borderWidth = 2
+        rotateHandle.layer.borderColor = UIColor.white.cgColor
+        rotateHandle.isHidden = true
+        rotateHandle.accessibilityIdentifier = "object-rotate-handle"
+        addSubview(rotateHandle)
+
         // 南京錠バッジ(ユーザーロック中のみ表示、タップで解除)。右上の角に半分かかる配置。
         let lockSymbol = UIImage(systemName: "lock.fill",
                                  withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
@@ -686,6 +705,9 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         let resizePan = UIPanGestureRecognizer(target: self, action: #selector(handleResizePan(_:)))
         resizePan.allowedTouchTypes = fingerOnly
         resizeHandle.addGestureRecognizer(resizePan)
+        let rotatePan = UIPanGestureRecognizer(target: self, action: #selector(handleRotatePan(_:)))
+        rotatePan.allowedTouchTypes = fingerOnly
+        rotateHandle.addGestureRecognizer(rotatePan)
 
         // 長押しで削除メニューを出す(要件: 画像等のオブジェクトは長押しで消す)
         addInteraction(editMenuInteraction)
@@ -804,6 +826,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         tableView.frame = bounds
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
         lockBadge.frame = CGRect(x: bounds.width - 11, y: -11, width: 22, height: 22)  // 右上の角
+        // 回転ハンドルは上辺の中央から少し上へ(コンテンツ空間で 28pt 上)
+        rotateHandle.frame = CGRect(x: bounds.midX - 11, y: -28 - 22, width: 22, height: 22)
 
         if kind == .stickyNote {
             // 影のパスを角丸に合わせる(perf)+ 文字が枠に収まるようフォントを自動調整
@@ -844,7 +868,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// コンテンツ空間なので、スクリーン上で概ね一定(約16pt)になるようズームで補正する。
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         let margin = 16 / max(layerView?.zoom ?? 1, 0.01)
-        return bounds.insetBy(dx: -margin, dy: -margin).contains(point)
+        if bounds.insetBy(dx: -margin, dy: -margin).contains(point) { return true }
+        // 上へ突き出た回転ハンドル(表示中のみ)も当たり判定に含める
+        if !rotateHandle.isHidden, rotateHandle.frame.insetBy(dx: -margin, dy: -margin).contains(point) {
+            return true
+        }
+        return false
     }
 
     // MARK: - モデル反映
@@ -857,6 +886,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         let fontChanged = kind == .text && fontSize != item.fontSize
         contentFrame = item.frame
         fontSize = item.fontSize
+        rotation = item.rotation
         parentGroupID = item.parentGroupID
         if isUserLocked != item.isUserLocked {
             isUserLocked = item.isUserLocked
@@ -916,7 +946,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// コンテンツ空間へ直接配置する。スクロール/ズームへの追従はスクロールビューの合成が行う
     /// ため、オフセットやズームの計算は不要(= スクロール中の再配置コストがゼロ)。
     func applyPlacement() {
-        frame = contentFrame
+        // 回転対応のため frame ではなく bounds + center + transform で配置する。
+        // rotation==0 では transform=identity となり、frame は従来と完全一致する
+        // (既存のフレーム依存挙動・テストに影響しない)。
+        transform = .identity  // bounds/center を素の座標系で設定するため一旦解除
+        bounds = CGRect(origin: .zero, size: contentFrame.size)
+        center = CGPoint(x: contentFrame.midX, y: contentFrame.midY)
+        transform = rotation == 0 ? .identity : CGAffineTransform(rotationAngle: rotation)
         if kind == .text {
             textView.font = .systemFont(ofSize: fontSize)
         }
@@ -944,6 +980,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // 表は列/行の個別リサイズハンドルで調整するため、四隅の一括リサイズは出さない。
         resizeHandle.isHidden = !show || kind == .table
         if kind == .table { tableView.setResizeHandlesVisible(show) }
+        // 回転ハンドルは単一選択かつ非ロックで表示(コネクタは非対象だが枠付きビューにならない)
+        rotateHandle.isHidden = !show
     }
 
     /// 移動・削除から保護されているか(システム/ユーザーどちらのロックでも)
@@ -1191,6 +1229,27 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             // false にした直後に高さを再計算させ、取りこぼしを解消する。
             if kind == .todo { todoListView.reportHeight() }
             layerView.onFrameChanged?(objectID, contentFrame)
+        default:
+            break
+        }
+    }
+
+    /// 回転ハンドルのドラッグで、中心からタッチ点への角度に合わせてオブジェクトを回転する。
+    /// ハンドルの静止位置は上辺の上(中心の真上)なので、rotation = 角度 + π/2。
+    @objc private func handleRotatePan(_ gesture: UIPanGestureRecognizer) {
+        guard let layerView, layerView.selectedID == objectID else { return }
+        let center = CGPoint(x: contentFrame.midX, y: contentFrame.midY)
+        switch gesture.state {
+        case .began:
+            isInteracting = true
+        case .changed:
+            let angle = SelectionGeometry.angle(from: center, to: gesture.location(in: layerView))
+            rotation = angle + .pi / 2
+            applyPlacement()
+            layerView.refreshConnectorPositions()
+        case .ended, .cancelled, .failed:
+            isInteracting = false
+            layerView.onRotationChanged?(objectID, rotation)
         default:
             break
         }

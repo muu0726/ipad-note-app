@@ -251,6 +251,7 @@ struct NoteCanvasView: View {
                 onDrawingChanged: { handleDrawingChanged() },
                 onViewportChanged: { handleViewportChanged($0, viewSize: geo.size) },
                 onObjectFrameChanged: { handleObjectFrameChanged($0, frame: $1) },
+                onObjectRotationChanged: { handleObjectRotationChanged($0, rotation: $1) },
                 onObjectTextChanged: { handleObjectTextChanged($0, text: $1) },
                 onObjectTodoChanged: { handleObjectTodoChanged($0, items: $1) },
                 onObjectDeleted: { handleObjectDeleted($0) },
@@ -295,6 +296,7 @@ struct NoteCanvasView: View {
                 onDrawingChanged: { handleDrawingChanged() },
                 onViewportChanged: { handleViewportChanged($0, viewSize: geo.size) },
                 onObjectFrameChanged: { handleObjectFrameChanged($0, frame: $1) },
+                onObjectRotationChanged: { handleObjectRotationChanged($0, rotation: $1) },
                 onObjectTextChanged: { handleObjectTextChanged($0, text: $1) },
                 onObjectTodoChanged: { handleObjectTodoChanged($0, items: $1) },
                 onObjectDeleted: { handleObjectDeleted($0) },
@@ -369,6 +371,20 @@ struct NoteCanvasView: View {
             if previous != frame, let uuid = object.id {
                 CanvasObjectUndo.registerFrameChange(
                     objectUUID: uuid, previousFrame: previous,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+        }
+    }
+
+    private func handleObjectRotationChanged(_ id: NSManagedObjectID, rotation: CGFloat) {
+        withObject(id) { object in
+            let previous = object.rotation
+            object.rotation = rotation
+            if previous != rotation, let uuid = object.id {
+                CanvasObjectUndo.registerRotationChange(
+                    objectUUID: uuid, previousRotation: previous,
                     in: undoBridge.activeUndoManager,
                     context: context, bridge: undoBridge
                 )
