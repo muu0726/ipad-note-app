@@ -658,6 +658,7 @@ struct CanvasRepresentable: UIViewRepresentable {
                 contentUnion: parent.infiniteContentUnion, currentWorldSize: worldSize
             )
             applyWorldSize(to: container)
+            updateInkWindow(in: container)
         }
 
         /// worldSize を contentView.bounds・背景/オブジェクト/インク各層のフレーム・
@@ -669,17 +670,48 @@ struct CanvasRepresentable: UIViewRepresentable {
             let size = CGSize(width: worldSize, height: worldSize)
             if container.contentView.bounds.size != size {
                 // contentView は原点固定・サイズのみ拡張(ズームは transform で別途掛かるため
-                // frame ではなく bounds を更新する)。子(背景/オブジェクト/インク)は等倍で追従。
+                // frame ではなく bounds を更新する)。オブジェクト層は等倍で追従。
+                // ※ 背景(patternView)は画面固定・ベクター直描きなので worldSize 追従は不要。
+                //   インク(canvasView)は可視範囲の「窓」なので updateInkWindow が別途配置する。
                 container.contentView.bounds = CGRect(origin: .zero, size: size)
-                container.patternView.frame = CGRect(origin: .zero, size: size)
                 container.objectLayer.frame = CGRect(origin: .zero, size: size)
-                container.canvasView.frame = CGRect(origin: .zero, size: size)
             }
             // ズーム対象 contentView の中心を「スケール後サイズの半分」に置き、frame 原点を (0,0) に
             // 保つ(paged の applyContentSize と同じ)。これを怠ると bounds 変更時に frame が負方向へ
             // ドリフトし、内容がずれる。呼び出しは isZooming 中は行わない(ピンチのアンカーを乱さない)。
-            container.contentView.center = CGPoint(x: worldSize * zoom / 2, y: worldSize * zoom / 2)
-            scrollView.contentSize = CGSize(width: worldSize * zoom, height: worldSize * zoom)
+            // ※ 描画変化のたびに updateUIView 経由でここが呼ばれるため、値が変わらないときは
+            //   代入しない(冪等)。無駄な center/contentSize 代入はレイアウトを誘発し、直前に
+            //   確定したストロークや背景が一瞬消える「描くたびちらつく」原因になる。
+            let newCenter = CGPoint(x: worldSize * zoom / 2, y: worldSize * zoom / 2)
+            if container.contentView.center != newCenter { container.contentView.center = newCenter }
+            let newContentSize = CGSize(width: worldSize * zoom, height: worldSize * zoom)
+            if scrollView.contentSize != newContentSize { scrollView.contentSize = newContentSize }
+        }
+
+        /// インク面(PKCanvasView)を「画面固定・ビューポートサイズのスクロールビュー」として、
+        /// 外側 scrollView のオフセット/ズームへ追従(ミラー)させる。
+        /// 巨大な contentView 直下に worldSize のインク面を置くと、PencilKit が巨大テクスチャに
+        /// ライブ描画(書いてる途中の線)を出せない。そこでインク面は contentView の外(scrollView
+        /// 直下)へ置き、frame=ビューポート・contentSize=worldSize のまま自身のズーム/オフセットを
+        /// 外側にミラーする。PencilKit はビューポート分だけを描画するのでライブ描画が正しく出る。
+        /// - `frame.origin = 外側 contentOffset`(scrollView 内で画面に固定表示)。
+        /// - `contentOffset/zoomScale = 外側と一致`(表示する world 範囲と倍率を合わせる)。
+        /// - drawing は world 座標のまま(contentSize=worldSize が描画可能域を全域に確保)。
+        func updateInkWindow(in container: CanvasContainerUIView) {
+            guard parent.noteType == .infinite else { return }
+            let scrollView = container.scrollView
+            guard scrollView.bounds.width > 0, scrollView.bounds.height > 0 else { return }
+            let ink = container.canvasView
+            // 描画可能域(contentSize)は world 全域。ズーム倍率は外側に合わせる。
+            let worldContent = CGSize(width: worldSize, height: worldSize)
+            if ink.contentSize != worldContent { ink.contentSize = worldContent }
+            if ink.zoomScale != scrollView.zoomScale { ink.zoomScale = scrollView.zoomScale }
+            if ink.contentOffset != scrollView.contentOffset { ink.contentOffset = scrollView.contentOffset }
+            // scrollView 内でビューポート位置に固定(contentOffset だけ動かして中身をミラー)。
+            let frame = CGRect(origin: scrollView.contentOffset, size: scrollView.bounds.size)
+            if ink.frame != frame { ink.frame = frame }
+            // 画面固定の背景ドット/罫線を現在のオフセット・ズームで再描画する。
+            container.patternView.updateViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
         }
 
         /// 現在の許可範囲で contentOffset をクランプする(復元・リセット等のプログラム設定用)
@@ -738,6 +770,8 @@ struct CanvasRepresentable: UIViewRepresentable {
             if parent.noteType == .infinite, !scrollView.isZooming {
                 let clamped = clampedInfiniteOffset(scrollView.contentOffset, for: scrollView)
                 if clamped != scrollView.contentOffset { scrollView.contentOffset = clamped }
+                // インク面の窓を可視範囲へ追従(スクロールに合わせて張り替える)
+                if let container { updateInkWindow(in: container) }
             }
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
@@ -819,6 +853,8 @@ struct CanvasRepresentable: UIViewRepresentable {
             guard scrollView === container?.scrollView else { return }
             container?.objectLayer.applyZoom(scrollView.zoomScale)
             container?.patternView.applyZoom(scrollView.zoomScale)
+            // インク面をピンチ中もズーム/オフセットへ追従(ミラー)させる。
+            if let container { updateInkWindow(in: container) }
             // contentSize(= contentView.bounds × zoom)は UIScrollView がピンチ中に自動追従する
             // ため触らない(paged 同様)。ワールド拡張/原点リベース/スクロール制限はズーム中に
             // 触らず、確定後(scrollViewDidEndZooming)にまとめて適用する(アンカーを乱さない)。
@@ -1253,25 +1289,49 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         scrollView.delaysContentTouches = false
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+
+        // 背景(patternView)は「画面固定」で最背面へ。ズーム transform で拡大しないので
+        // タイル継ぎ目の格子線が出ない(draw(_:) がオフセット/ズームから世界固定ドットを直描き)。
+        patternView.frame = bounds
+        patternView.isUserInteractionEnabled = false
+        addSubview(patternView)   // scrollView より先 = 最背面
         addSubview(scrollView)
 
-        // ズーム対象 contentView(世界座標サイズ)
+        // ズーム対象 contentView(世界座標サイズ、透過)
         contentView.frame = content
+        contentView.backgroundColor = .clear
         scrollView.addSubview(contentView)
         scrollView.contentSize = content.size  // 初期ズーム 1.0
 
-        // 背景 < オブジェクト < インク の順に contentView へ内包
-        patternView.frame = content
+        // オブジェクト層を contentView(ズーム対象)へ内包(背景の上・インクの下)。
         objectLayer.frame = content
-        canvasView.frame = content
-        contentView.addSubview(patternView)
         contentView.addSubview(objectLayer)
-        contentView.addSubview(canvasView)
 
-        // インク(スクロール無効・透過・Pencil Only、テスト時のみ指描画許可)
+        // インク面は contentView の外(scrollView 直下・最前面)へ置く。
+        // contentView 直下に worldSize のインクを置くと PencilKit が巨大テクスチャにライブ描画を
+        // 出せないため、インクは「ビューポートサイズのスクロールビュー」として外側 scrollView の
+        // オフセット/ズームをミラーする(updateInkWindow)。PencilKit はビューポート分だけ描画する
+        // のでライブ描画(書いてる途中の線)が正しく出る。
+        canvasView.frame = CGRect(origin: .zero, size: content.size == .zero ? CGSize(width: 1400, height: 1000) : bounds.size)
+        scrollView.addSubview(canvasView)  // contentView より後 = 最前面
+
+        // インク(透過・Pencil Only、テスト時のみ指描画許可)。ズーム/スクロールのジェスチャは
+        // 外側 scrollView が担うため、インク自身の pan/pinch は無効化し、offset/zoom はミラーで反映。
         let allowFingerDrawing = ProcessInfo.processInfo.environment["ALLOW_FINGER_DRAWING"] == "1"
         canvasView.drawingPolicy = allowFingerDrawing ? .anyInput : .pencilOnly
+        canvasView.contentInsetAdjustmentBehavior = .never
+        canvasView.minimumZoomScale = 0.1
+        canvasView.maximumZoomScale = 4.0
+        canvasView.bounces = false
+        canvasView.bouncesZoom = false
+        canvasView.showsHorizontalScrollIndicator = false
+        canvasView.showsVerticalScrollIndicator = false
+        // インク自身はスクロール/ズームのジェスチャに一切参加させない(入れ子スクロールビューの
+        // ジェスチャ協調が外側のピンチを奪うのを防ぐ)。offset/zoom はプログラムでミラーする。
         canvasView.isScrollEnabled = false
+        canvasView.panGestureRecognizer.isEnabled = false
+        canvasView.pinchGestureRecognizer?.isEnabled = false
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
         drawingTouchGate.forward = canvasView.drawingGestureRecognizer.delegate
@@ -1292,6 +1352,7 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         scrollView.frame = bounds
+        patternView.frame = bounds   // 背景は画面固定(全面)
         if bounds.size != lastLayoutBoundsSize {
             lastLayoutBoundsSize = bounds.size
             onBoundsChange?()
@@ -1424,6 +1485,8 @@ final class BackgroundPatternUIView: UIView {
     private var tileScale: CGFloat = UIScreen.main.scale
     /// 現在のズーム倍率(無限キャンバスのダイナミックグリッド用)
     private var currentZoom: CGFloat = 1.0
+    /// 現在のコンテンツオフセット(無限キャンバスの画面固定背景描画用)
+    private var currentOffset: CGPoint = .zero
     /// paged 用のページビュー(1枚 = 1ページ)
     private var pageViews: [UIView] = []
 
@@ -1482,12 +1545,80 @@ final class BackgroundPatternUIView: UIView {
         case .infinite:
             pageViews.forEach { $0.removeFromSuperview() }
             pageViews.removeAll()
-            backgroundColor = (style == .blank)
-                ? infiniteBoardColor
-                : UIColor(patternImage: makeTile())
+            // 無限キャンバスの背景は「画面固定のベクター描画」(draw(_:))で描く。
+            // patternImage をズーム transform で拡大すると、タイル境界が格子線として現れる
+            // (非整数倍のリサンプリングによる継ぎ目)。ベクター直描きなら継ぎ目が出ない。
+            backgroundColor = infiniteBoardColor
+            isOpaque = true
+            contentMode = .redraw
+            setNeedsDisplay()
         case .paged:
             backgroundColor = .systemGray5  // 机(背景)のグレー
             rebuildPages()
+        }
+    }
+
+    /// スクロール/ズームのたびに呼ばれ、画面固定のドット/罫線を再描画するための
+    /// ビューポート(コンテンツオフセット・ズーム)を受け取る(無限キャンバスのみ)。
+    func updateViewport(contentOffset: CGPoint, zoomScale: CGFloat) {
+        guard noteType == .infinite else { return }
+        guard currentOffset != contentOffset || currentZoom != zoomScale else { return }
+        currentOffset = contentOffset
+        currentZoom = zoomScale
+        setNeedsDisplay()
+    }
+
+    /// 無限キャンバスの背景を画面座標で直接描く(タイル継ぎ目のない世界固定ドット/罫線)。
+    /// 世界座標 W の画面位置は screen = W * zoom - contentOffset。間隔・ドット径はズームに比例
+    /// させて世界に固定する(拡大するとドット数は減り1つが大きくなる = Freeform 準拠)。
+    override func draw(_ rect: CGRect) {
+        guard noteType == .infinite, let c = UIGraphicsGetCurrentContext() else { return }
+        infiniteBoardColor.setFill()
+        c.fill(rect)
+        guard style != .blank else { return }
+        let zoom = max(currentZoom, 0.0001)
+        let s = Self.spacing * zoom            // 画面上のマス間隔
+        guard s >= 6 else { return }           // 密すぎる(ズームアウト)ときは描かない
+        let ox = currentOffset.x, oy = currentOffset.y
+        let color = pageColor.patternUIColor
+
+        // 世界の格子境界(W = 40k)の画面 X = k*s - ox。画面内に来る最初の境界位置。
+        func firstLine(_ o: CGFloat) -> CGFloat {
+            let v = (-o).truncatingRemainder(dividingBy: s)
+            return v < 0 ? v + s : v
+        }
+        let baseX = firstLine(ox), baseY = firstLine(oy)
+
+        switch style {
+        case .dots:
+            // ドット中心は各マス中央(W = 40k + 20)→ 画面 = 境界 + s/2
+            let d = max(1.0, 2.6 * zoom)
+            color.setFill()
+            var x = baseX + s / 2 - s
+            while x < rect.width + s {
+                var y = baseY + s / 2 - s
+                while y < rect.height + s {
+                    c.fillEllipse(in: CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d))
+                    y += s
+                }
+                x += s
+            }
+        case .grid:
+            color.setStroke()
+            c.setLineWidth(max(0.5, 0.5 * zoom))
+            var x = baseX
+            while x < rect.width + s { c.move(to: CGPoint(x: x, y: 0)); c.addLine(to: CGPoint(x: x, y: rect.height)); x += s }
+            var y = baseY
+            while y < rect.height + s { c.move(to: CGPoint(x: 0, y: y)); c.addLine(to: CGPoint(x: rect.width, y: y)); y += s }
+            c.strokePath()
+        case .lines:
+            color.setStroke()
+            c.setLineWidth(max(0.5, 0.5 * zoom))
+            var y = baseY
+            while y < rect.height + s { c.move(to: CGPoint(x: 0, y: y)); c.addLine(to: CGPoint(x: rect.width, y: y)); y += s }
+            c.strokePath()
+        case .blank:
+            break
         }
     }
 
