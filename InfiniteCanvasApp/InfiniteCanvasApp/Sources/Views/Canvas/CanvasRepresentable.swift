@@ -230,8 +230,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                 canvas.minimumZoomScale = min(pagedMinimumZoom(for: canvas), canvas.maximumZoomScale)
             case .infinite:
                 canvas.minimumZoomScale = 0.1
-                // フリーボードに合わせて上限 500%
-                canvas.maximumZoomScale = 5.0
+                // Freeform に合わせて上限 400%(背景の定常密度化で"広すぎ"体感は解消)
+                canvas.maximumZoomScale = 4.0
             }
         }
 
@@ -1446,24 +1446,15 @@ final class BackgroundPatternUIView: UIView {
     /// paged 用のページビュー(1枚 = 1ページ)
     private var pageViews: [UIView] = []
 
-    /// 無限キャンバスのグリッド表示帯: 2=通常, 1=広間隔, 0=非表示。
-    /// 純ロジック(ユニットテスト対象)。
-    static func zoomBand(_ zoom: CGFloat) -> Int {
-        if zoom >= 0.5 { return 2 }
-        if zoom >= 0.15 { return 1 }
-        return 0
-    }
-
-    /// 無限キャンバスのズーム帯ごとのタイル間隔(コンテンツ空間)。nil はパターン非表示。
-    /// 間隔はコンテンツ空間で固定し、画面上はズームに線形比例させる(Freeform 準拠)。
-    /// 縮小時(帯1)は間隔を倍にして密になりすぎるのを防ぎ、極小ズーム(帯0)では描かない。
-    /// 純ロジック(ユニットテスト対象)。
-    static func tileSpacing(forBand band: Int, base: CGFloat) -> CGFloat? {
-        switch band {
-        case 2: return base
-        case 1: return base * 2
-        default: return nil
-        }
+    /// 無限キャンバス: 画面上のドット/格子間隔がほぼ一定(≈ targetScreen px)に見えるよう、
+    /// コンテンツ空間のタイル間隔を `base × 2^k` から選ぶ。パターンはズーム合成で拡縮されるため、
+    /// ズームインするほどコンテンツ間隔を細かくして肥大化を防ぎ、Freeform 風に細かく再分割する。
+    /// (画面間隔 = 間隔 × zoom ≈ targetScreen)。純ロジック(ユニットテスト対象)。
+    static func infiniteSpacing(forZoom zoom: CGFloat, base: CGFloat = spacing, targetScreen: CGFloat = 36) -> CGFloat {
+        let z = max(zoom, 0.0001)
+        let k = (log2(targetScreen / z / base)).rounded()
+        let step = base * pow(2, k)
+        return min(max(step, base / 16), base * 64)
     }
 
     override init(frame: CGRect) {
@@ -1494,13 +1485,14 @@ final class BackgroundPatternUIView: UIView {
     /// タイル間隔はコンテンツ空間で固定(Freeform 準拠)。画面上の見かけの拡縮は
     /// スクロールビューのズーム合成が担うため、ここでは間隔を動かさない。
     func applyZoom(_ zoom: CGFloat) {
-        let bandChanged = noteType == .infinite
-            && Self.zoomBand(zoom) != Self.zoomBand(currentZoom)
+        // 無限キャンバスは「画面上の間隔一定」のため、コンテンツ間隔の段(base×2^k)が変わったら焼き直す。
+        let spacingChanged = noteType == .infinite
+            && Self.infiniteSpacing(forZoom: zoom) != Self.infiniteSpacing(forZoom: currentZoom)
         currentZoom = zoom
         let target = min(max(UIScreen.main.scale * zoom, UIScreen.main.scale), 12)
         let scaleChanged = abs(target - tileScale) > 0.5
         if scaleChanged { tileScale = target }
-        if scaleChanged || bandChanged { rebuild() }
+        if scaleChanged || spacingChanged { rebuild() }
     }
 
     private func rebuild() {
@@ -1547,22 +1539,15 @@ final class BackgroundPatternUIView: UIView {
     }
 
     /// 1マス分のタイル画像。タイルには用紙色の下地も含めるので、これ一枚で全面を塗れる。
-    /// 間隔・ドット径・線幅はコンテンツ空間で固定し、画面上の拡縮はスクロールビューの
-    /// ズーム合成に任せる(Freeform 仕様)。無限キャンバスはズーム帯で密度だけ切り替える:
-    /// 50%以上=40pt、15〜50%=80pt、15%未満=非表示(背景色のみ)。
+    /// 通常ノート(paged)は用紙固定の 40pt。無限キャンバスは `infiniteSpacing` で画面上の間隔が
+    /// ほぼ一定になるようコンテンツ間隔を選び、ドット径・線幅も間隔に比例させて画面上一定に保つ
+    /// (ズームインで肥大化しない = Freeform 準拠)。
     private func makeTile() -> UIImage {
         let base = Self.spacing  // = PageMetrics.width / 20 (=40)
-        var spacing = base
-        var draw = true
-        if noteType == .infinite {
-            if let bandSpacing = Self.tileSpacing(forBand: Self.zoomBand(currentZoom), base: base) {
-                spacing = bandSpacing
-            } else {
-                draw = false  // 極小ズームは背景色のみ
-            }
-        }
-        let dotSize: CGFloat = 3.0
-        let lineWidth: CGFloat = 0.5
+        let spacing = (noteType == .infinite) ? Self.infiniteSpacing(forZoom: currentZoom, base: base) : base
+        // 無限は間隔に比例させて画面上のドット/線を一定に保つ。paged は用紙固定サイズ。
+        let dotSize: CGFloat = (noteType == .infinite) ? spacing * 0.085 : 3.0
+        let lineWidth: CGFloat = (noteType == .infinite) ? spacing * 0.02 : 0.5
 
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = tileScale
@@ -1574,7 +1559,6 @@ final class BackgroundPatternUIView: UIView {
             let c = ctx.cgContext
             pageColor.backgroundUIColor.setFill()
             c.fill(CGRect(x: 0, y: 0, width: spacing, height: spacing))
-            guard draw else { return }  // 極小ズームは背景色のみ
 
             switch style {
             case .grid:
