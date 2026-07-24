@@ -614,9 +614,8 @@ struct CanvasRepresentable: UIViewRepresentable {
         private var isReplacingDrawing = false
         /// 投げ縄でのインク移動・削除を差分検知するための直前の描画
         private var previousDrawing = PKDrawing()
-        /// 自前投げ縄(範囲選択マーキー): ドラッグ開始点と現在点(コンテンツ座標)
-        private var lassoStart: CGPoint = .zero
-        private var lassoCurrent: CGPoint = .zero
+        /// 自前投げ縄: ドラッグ中の頂点列(コンテンツ座標)。自由曲線/範囲マーキーの両方に使う。
+        private var lassoPoints: [CGPoint] = []
         /// 自前投げ縄: 現在の一括選択(ストローク index + オブジェクト ID)
         private var lassoSelection = SelectionSession()
         /// 自前投げ縄: 統一枠ドラッグでのインク移動の基準描画(移動開始時)
@@ -921,31 +920,33 @@ struct CanvasRepresentable: UIViewRepresentable {
 
         // MARK: - 自前投げ縄によるインク+オブジェクト一括選択(指示書 2.2「ドラッグおよび投げ縄」)
 
-        /// 範囲選択マーキー(開始点〜現在点の矩形)。
-        private var lassoRect: CGRect {
-            CGRect(x: min(lassoStart.x, lassoCurrent.x), y: min(lassoStart.y, lassoCurrent.y),
-                   width: abs(lassoCurrent.x - lassoStart.x), height: abs(lassoCurrent.y - lassoStart.y))
-        }
-        /// マーキー矩形の4隅(オーバーレイの破線描画用)。
-        private var lassoRectCorners: [CGPoint] {
-            let r = lassoRect
-            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
-                    CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY)]
+        /// ドラッグの点列を「自由曲線が十分な面積で囲めている」なら閉多角形へ、
+        /// そうでなければ(直線ドラッグ等)外接矩形のマーキーへフォールバックしてポリゴンを作る。
+        private func lassoPolygon() -> (polygon: CGPath, bounds: CGRect)? {
+            let bounds = LassoHitTesting.boundingBox(lassoPoints)
+            guard bounds.width > 4, bounds.height > 4 else { return nil }
+            // 面積が外接矩形の20%以上なら自由曲線として扱い、未満なら範囲マーキーへ。
+            let area = LassoHitTesting.polygonArea(lassoPoints)
+            if lassoPoints.count >= 3, area >= bounds.width * bounds.height * 0.2,
+               let freeform = LassoHitTesting.polygon(from: lassoPoints) {
+                return (freeform, bounds)
+            }
+            return (LassoHitTesting.polygon(from: bounds), bounds)
         }
 
-        /// 範囲選択ドラッグの各段階を処理する。座標は objectLayer(コンテンツ空間)で読む。
+        /// 投げ縄ドラッグの各段階を処理する。座標は objectLayer(コンテンツ空間)で読む。
         func handleLassoPan(_ gesture: UIPanGestureRecognizer, in container: CanvasContainerUIView) {
             let point = gesture.location(in: container.objectLayer)
             switch gesture.state {
             case .began:
                 container.objectLayer.clearLassoSelection()
                 lassoSelection = SelectionSession()
-                lassoStart = point; lassoCurrent = point
+                lassoPoints = [point]
             case .changed:
-                lassoCurrent = point
-                container.objectLayer.updateLassoDrawing(points: lassoRectCorners)
+                lassoPoints.append(point)
+                container.objectLayer.updateLassoDrawing(points: lassoPoints)
             case .ended:
-                lassoCurrent = point
+                lassoPoints.append(point)
                 finishLasso(in: container)
             case .cancelled, .failed:
                 container.objectLayer.lassoView.clear()
@@ -956,11 +957,9 @@ struct CanvasRepresentable: UIViewRepresentable {
 
         /// 範囲を確定してインクストローク + オブジェクトを一括選択し、統一枠を表示する。
         private func finishLasso(in container: CanvasContainerUIView) {
-            let rect = lassoRect
-            guard rect.width > 4, rect.height > 4 else {
+            guard let (polygon, rect) = lassoPolygon() else {
                 container.objectLayer.lassoView.clear(); return
             }
-            let polygon = LassoHitTesting.polygon(from: rect)
 
             // インク: サンプル点の6割以上が内側のストロークを選ぶ(renderBounds で早期除外)
             var indices: Set<Int> = []

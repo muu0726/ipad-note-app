@@ -44,4 +44,28 @@ enum LassoHitTesting {
     static func canIntersect(_ bounds: CGRect, lassoBounds: CGRect) -> Bool {
         !bounds.isNull && bounds.intersects(lassoBounds)
     }
+
+    /// 頂点列が囲む多角形の面積(シューレース公式、絶対値)。
+    /// 自由曲線投げ縄か直線ドラッグ(≒面積0)かの判定に使う。
+    static func polygonArea(_ points: [CGPoint]) -> CGFloat {
+        guard points.count >= 3 else { return 0 }
+        var sum: CGFloat = 0
+        for i in points.indices {
+            let a = points[i]
+            let b = points[(i + 1) % points.count]
+            sum += a.x * b.y - b.x * a.y
+        }
+        return abs(sum) / 2
+    }
+
+    /// 頂点列の外接矩形。
+    static func boundingBox(_ points: [CGPoint]) -> CGRect {
+        guard let first = points.first else { return .null }
+        var minX = first.x, minY = first.y, maxX = first.x, maxY = first.y
+        for p in points.dropFirst() {
+            minX = min(minX, p.x); minY = min(minY, p.y)
+            maxX = max(maxX, p.x); maxY = max(maxY, p.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
 }

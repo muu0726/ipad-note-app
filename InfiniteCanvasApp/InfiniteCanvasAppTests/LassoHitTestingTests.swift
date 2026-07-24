@@ -85,4 +85,35 @@ struct LassoHitTestingTests {
         #expect(!LassoHitTesting.canIntersect(CGRect(x: 200, y: 200, width: 5, height: 5), lassoBounds: lassoBounds))
         #expect(!LassoHitTesting.canIntersect(.null, lassoBounds: lassoBounds))
     }
+
+    @Test("多角形の面積(シューレース): 正方形は辺^2")
+    func polygonAreaSquare() {
+        let square = [CGPoint(x: 0, y: 0), CGPoint(x: 10, y: 0), CGPoint(x: 10, y: 10), CGPoint(x: 0, y: 10)]
+        #expect(abs(LassoHitTesting.polygonArea(square) - 100) < 1e-6)
+    }
+
+    @Test("直線状の点列は面積ほぼ0(範囲マーキーへフォールバックする根拠)")
+    func polygonAreaOfLineIsZero() {
+        let line = [CGPoint(x: 0, y: 0), CGPoint(x: 50, y: 50), CGPoint(x: 100, y: 100)]
+        #expect(LassoHitTesting.polygonArea(line) < 1e-6)
+    }
+
+    @Test("自由曲線ポリゴン(円状)で内側の点を選び外側を除外する")
+    func freeformPolygonSelects() {
+        // 中心(50,50)半径40の多角形近似
+        let circle = (0..<16).map { i -> CGPoint in
+            let a = CGFloat(i) / 16 * 2 * .pi
+            return CGPoint(x: 50 + 40 * cos(a), y: 50 + 40 * sin(a))
+        }
+        let poly = LassoHitTesting.polygon(from: circle)!
+        #expect(LassoHitTesting.rectIsSelected(CGRect(x: 45, y: 45, width: 10, height: 10), inside: poly))
+        #expect(!LassoHitTesting.rectIsSelected(CGRect(x: 100, y: 100, width: 10, height: 10), inside: poly))
+    }
+
+    @Test("外接矩形は頂点列を包含する")
+    func boundingBoxContainsPoints() {
+        let pts = [CGPoint(x: 10, y: 20), CGPoint(x: 60, y: 5), CGPoint(x: 30, y: 80)]
+        let box = LassoHitTesting.boundingBox(pts)
+        #expect(box == CGRect(x: 10, y: 5, width: 50, height: 75))
+    }
 }
