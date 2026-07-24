@@ -12,6 +12,7 @@ enum ObjectInsertion: Equatable {
     case todo            // チェックリスト
     case shape(ShapeType)  // 図形(矩形・楕円・三角・直線・矢印・星)
     case table(rows: Int, cols: Int)  // 表(Excel風)
+    case stickyNote(StickyNoteColor)  // 付箋(カラー付き)
 }
 
 /// 1つのノートの無限キャンバス。
@@ -40,6 +41,8 @@ struct NoteCanvasView: View {
     @State private var scrollToPage: Int?
     /// ズームを 100% に戻す要求(左上バッジのメニューから)
     @State private var resetZoomRequested = false
+    /// コンテンツ全体を画面に収める(Zoom to Fit)要求(左上バッジのメニューから)
+    @State private var zoomToFitRequested = false
     /// 現在のズーム倍率(表示用)
     @State private var currentZoomScale: CGFloat = 1.0
     /// ズームロック: true のときピンチズームを禁止する
@@ -248,6 +251,7 @@ struct NoteCanvasView: View {
                 onDrawingChanged: { handleDrawingChanged() },
                 onViewportChanged: { handleViewportChanged($0, viewSize: geo.size) },
                 onObjectFrameChanged: { handleObjectFrameChanged($0, frame: $1) },
+                onObjectRotationChanged: { handleObjectRotationChanged($0, rotation: $1) },
                 onObjectTextChanged: { handleObjectTextChanged($0, text: $1) },
                 onObjectTodoChanged: { handleObjectTodoChanged($0, items: $1) },
                 onObjectDeleted: { handleObjectDeleted($0) },
@@ -275,6 +279,7 @@ struct NoteCanvasView: View {
                 drawing: $drawing,
                 pkTool: toolState.pkTool,
                 isSelectMode: toolState.isSelectMode,
+                isLassoSelectionMode: toolState.tool == .lasso,
                 placementTool: toolState.tool.isPlacementTool ? toolState.tool : nil,
                 onPlaceObject: { tool, point in placeObjectItem(tool, at: point) },
                 isShapeAssistEnabled: toolState.isShapeAssistEnabled,
@@ -291,6 +296,7 @@ struct NoteCanvasView: View {
                 onDrawingChanged: { handleDrawingChanged() },
                 onViewportChanged: { handleViewportChanged($0, viewSize: geo.size) },
                 onObjectFrameChanged: { handleObjectFrameChanged($0, frame: $1) },
+                onObjectRotationChanged: { handleObjectRotationChanged($0, rotation: $1) },
                 onObjectTextChanged: { handleObjectTextChanged($0, text: $1) },
                 onObjectTodoChanged: { handleObjectTodoChanged($0, items: $1) },
                 onObjectDeleted: { handleObjectDeleted($0) },
@@ -298,6 +304,7 @@ struct NoteCanvasView: View {
                 onTextSelectionChanged: { handleTextSelectionChanged($0) },
                 onLassoObjectsMoved: { region, delta in moveObjectsWithLasso(in: region, by: delta) },
                 onLassoObjectsDeleted: { region in deleteObjectsWithLasso(in: region) },
+                onCanvasRebased: { delta in rebaseCanvas(by: delta) },
                 onNoteLinkActivated: { id in openLinkedNote(objectID: id) },
                 onObjectShapeEditRequested: { id in requestShapeEdit(id) },
                 onObjectTableChanged: { id, payload in handleObjectTableChanged(id, payload: payload) },
@@ -305,13 +312,16 @@ struct NoteCanvasView: View {
                 onToggleUserLock: { id in toggleUserLock(objectID: id) },
                 onGroupObjects: { ids in groupObjects(ids) },
                 onUngroupObjects: { ids in ungroupObjects(ids) },
+                onConnectObjects: { ids in connectObjects(ids) },
                 onAppendPage: { addPage() },
                 onSelectionChanged: { handleSelectionChanged($0) },
                 onCanvasReady: { undoBridge.attach($0) },
                 scrollToPage: scrollToPage,
                 onScrollHandled: { scrollToPage = nil },
                 resetZoomRequested: resetZoomRequested,
-                onZoomResetHandled: { resetZoomRequested = false }
+                onZoomResetHandled: { resetZoomRequested = false },
+                zoomToFitRequested: zoomToFitRequested,
+                onZoomToFitHandled: { zoomToFitRequested = false }
             )
         }
     }
@@ -361,6 +371,20 @@ struct NoteCanvasView: View {
             if previous != frame, let uuid = object.id {
                 CanvasObjectUndo.registerFrameChange(
                     objectUUID: uuid, previousFrame: previous,
+                    in: undoBridge.activeUndoManager,
+                    context: context, bridge: undoBridge
+                )
+            }
+        }
+    }
+
+    private func handleObjectRotationChanged(_ id: NSManagedObjectID, rotation: CGFloat) {
+        withObject(id) { object in
+            let previous = object.rotation
+            object.rotation = rotation
+            if previous != rotation, let uuid = object.id {
+                CanvasObjectUndo.registerRotationChange(
+                    objectUUID: uuid, previousRotation: previous,
                     in: undoBridge.activeUndoManager,
                     context: context, bridge: undoBridge
                 )
@@ -503,6 +527,14 @@ struct NoteCanvasView: View {
                     resetZoomRequested = true
                 } label: {
                     Label("100%に戻す", systemImage: "1.magnifyingglass")
+                }
+                if note.canvasNoteType == .infinite {
+                    Button {
+                        zoomToFitRequested = true
+                    } label: {
+                        Label("全体表示", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+                    }
+                    .accessibilityIdentifier("canvas-zoom-fit")
                 }
             } label: {
                 Text("\(Int((currentZoomScale * 100).rounded()))%")
@@ -928,6 +960,34 @@ struct NoteCanvasView: View {
         persist()
     }
 
+    /// 選択中の2オブジェクトをコネクタ線で接続する(接続元/先の UUID を保存・Undo あり)。
+    /// 端点の移動・リサイズには描画時に都度追従する。端点が消えると自動的に描かれなくなる。
+    private func connectObjects(_ ids: [NSManagedObjectID]) {
+        guard ids.count == 2 else { return }
+        onActivate()
+        guard let a = (try? context.existingObject(with: ids[0])) as? CanvasObject,
+              let b = (try? context.existingObject(with: ids[1])) as? CanvasObject,
+              a.objectKind != .connector, b.objectKind != .connector,
+              let aUUID = a.id?.uuidString, let bUUID = b.id?.uuidString else { return }
+        let object = CanvasObject(context: context)
+        object.id = UUID()
+        object.createdAt = .now
+        object.updatedAt = .now
+        object.note = note
+        object.zOrder = (objects.last?.zOrder ?? 0) + 1
+        object.kind = CanvasObjectKind.connector.rawValue
+        object.connectorPayload = ConnectorPayload(sourceID: aUUID, targetID: bUUID, hasArrow: true)
+        object.contentFrame = a.contentFrame.union(b.contentFrame)  // 参考値(実表示は端点から都度算出)
+        try? context.obtainPermanentIDs(for: [object])
+        persist()
+        if let uuid = object.id {
+            CanvasObjectUndo.registerInsert(
+                objectUUID: uuid, in: undoBridge.activeUndoManager,
+                context: context, bridge: undoBridge
+            )
+        }
+    }
+
     /// グループを解除する(渡された全 ID の parentGroupID を消す)
     private func ungroupObjects(_ ids: [NSManagedObjectID]) {
         onActivate()
@@ -950,6 +1010,16 @@ struct NoteCanvasView: View {
                 )
             }
             context.delete(object)
+        }
+        scheduleAutoSave()
+    }
+
+    /// 無限キャンバスの原点リベースで座標系全体が平行移動したとき、全オブジェクトの座標にも
+    /// 同じ量を反映する。内部座標系の実装詳細でありユーザー操作ではないため、Undo 登録はしない
+    /// (見た目は一切動かないので Undo 対象にする必要がない。自動保存デバウンスに任せる)。
+    private func rebaseCanvas(by delta: CGVector) {
+        for object in objects where !object.isDeleted {
+            object.contentFrame = object.contentFrame.offsetBy(dx: delta.dx, dy: delta.dy)
         }
         scheduleAutoSave()
     }
@@ -1058,6 +1128,13 @@ struct NoteCanvasView: View {
                 x: center.x - size.width / 2, y: center.y - size.height / 2,
                 width: size.width, height: size.height
             )
+        case .stickyNote(let color):
+            object.kind = CanvasObjectKind.stickyNote.rawValue
+            object.text = ""
+            object.fontSize = 20
+            object.stickyNotePayload = StickyNotePayload(color: color)
+            // 正方形に近い付箋(180×180)をタップ/ビューポート中心に配置。
+            object.contentFrame = CGRect(x: center.x - 90, y: center.y - 90, width: 180, height: 180)
         }
 
         // 保存前後で objectID が変わるとレイヤーのビューが作り直されるため先に確定させる
@@ -1095,7 +1172,7 @@ struct NoteCanvasView: View {
             let firstPage = layout.pageRect(0)
             return CGPoint(x: firstPage.midX, y: firstPage.midY)
         }
-        let half = CanvasRepresentable.canvasSize / 2
+        let half = DynamicCanvasBounds.initialWorldSize / 2
         return CGPoint(x: half, y: half)
     }
 

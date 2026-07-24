@@ -46,6 +46,7 @@ struct CanvasTabsView: View {
                 onInsertPDF: { isPDFImporterPresented = true },
                 onInsertNoteLink: { showNoteLinkPicker = true },
                 onInsertTodo: { setActiveInsertion(.todo) },
+                onInsertStickyNote: { color in setActiveInsertion(.stickyNote(color)) },
                 onOpenLibrary: { session.showLibrary() },
                 onFontSizeChange: changeSelectedTextFontSize
             )

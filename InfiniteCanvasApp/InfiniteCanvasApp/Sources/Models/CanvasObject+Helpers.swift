@@ -9,6 +9,54 @@ enum CanvasObjectKind: String {
     case todo      // チェックリスト(タスク管理)
     case shape     // 図形(矩形・楕円・三角・直線・矢印・星)
     case table     // 表(Excel風・可変列幅/行高)
+    case stickyNote  // 付箋(カラー・角丸・影・ダブルタップ編集)
+    case connector   // 2オブジェクトを結ぶ自動追従コネクタ線
+}
+
+/// コネクタ線のパラメータ。payload に JSON で保存する。
+/// 接続先はオブジェクトの UUID 文字列で参照し、位置は描画時に都度解決する
+/// (既存の linkedNoteUUID と同じ「UUID参照+都度解決」パターン)。
+struct ConnectorPayload: Codable, Equatable {
+    var sourceID: String  // 接続元オブジェクトの UUID
+    var targetID: String  // 接続先オブジェクトの UUID
+    var hasArrow: Bool = true
+}
+
+/// 付箋の色(Freeform 準拠の6色)。payload の StickyNotePayload に保持する。
+enum StickyNoteColor: String, Codable, CaseIterable {
+    case yellow, green, pink, blue, purple, gray
+
+    /// ＋メニューでの表示名。
+    var displayName: String {
+        switch self {
+        case .yellow: "イエロー"
+        case .green: "グリーン"
+        case .pink: "ピンク"
+        case .blue: "ブルー"
+        case .purple: "パープル"
+        case .gray: "グレー"
+        }
+    }
+
+    /// 付箋の背景色(淡いパステル)。
+    var backgroundUIColor: UIColor {
+        switch self {
+        case .yellow: UIColor(red: 1.00, green: 0.92, blue: 0.55, alpha: 1)
+        case .green:  UIColor(red: 0.78, green: 0.93, blue: 0.68, alpha: 1)
+        case .pink:   UIColor(red: 1.00, green: 0.78, blue: 0.85, alpha: 1)
+        case .blue:   UIColor(red: 0.72, green: 0.87, blue: 1.00, alpha: 1)
+        case .purple: UIColor(red: 0.85, green: 0.80, blue: 0.98, alpha: 1)
+        case .gray:   UIColor(red: 0.88, green: 0.89, blue: 0.90, alpha: 1)
+        }
+    }
+
+    /// 付箋上の文字色(パステル背景で読みやすい濃色)。
+    var textUIColor: UIColor { UIColor(white: 0.13, alpha: 1) }
+}
+
+/// 付箋オブジェクトのパラメータ。payload に JSON で保存する。
+struct StickyNotePayload: Codable, Equatable {
+    var color: StickyNoteColor
 }
 
 /// Todoリストの1項目。payload に [TodoItem] を JSON で保存する。
@@ -184,6 +232,18 @@ extension CanvasObject {
         set { payload = newValue.flatMap { try? JSONEncoder().encode($0) } }
     }
 
+    /// 付箋のパラメータ。payload に JSON で保存する(未設定は nil)
+    var stickyNotePayload: StickyNotePayload? {
+        get { payload.flatMap { try? JSONDecoder().decode(StickyNotePayload.self, from: $0) } }
+        set { payload = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
+    /// コネクタ線のパラメータ。payload に JSON で保存する(未設定は nil)
+    var connectorPayload: ConnectorPayload? {
+        get { payload.flatMap { try? JSONDecoder().decode(ConnectorPayload.self, from: $0) } }
+        set { payload = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
     /// ノートリンクの場合、リンク先の NoteFile を UUID から引く(ゴミ箱・削除済みは nil)
     var resolvedLinkedNote: NoteFile? {
         guard objectKind == .noteLink,
@@ -235,6 +295,20 @@ extension CanvasObject {
                     .foregroundColor: pageColor.contentUIColor,
                 ]
             )
+        case .stickyNote:
+            let color = stickyNotePayload?.color ?? .yellow
+            let path = UIBezierPath(roundedRect: contentFrame, cornerRadius: 8)
+            color.backgroundUIColor.setFill()
+            path.fill()
+            ((text ?? "") as NSString).draw(
+                in: contentFrame.insetBy(dx: 8, dy: 8),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 15),
+                    .foregroundColor: color.textUIColor,
+                ]
+            )
+        case .connector:
+            break  // コネクタは接続先の位置に依存するためサムネイルには描かない
         case .shape:
             guard let shape = shapePayload else { break }
             let lw = max(0.5, shape.lineWidth)
@@ -310,7 +384,7 @@ extension CanvasObject {
                 of: CGSize(width: box.width * scale, height: box.height * scale),
                 for: .mediaBox
             )
-        case .text, .noteLink, .todo, .shape, .table:
+        case .text, .noteLink, .todo, .shape, .table, .stickyNote, .connector:
             return nil
         }
     }

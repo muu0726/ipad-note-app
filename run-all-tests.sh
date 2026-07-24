@@ -132,6 +132,11 @@ GROUP_2_TARGETS=(
 GROUP_3_DESC="[Group 3: オブジェクト UI テスト] オブジェクト操作 (挿入/選択/リサイズ/削除、フォントサイズ変更と再起動復元、ドラッグ移動、図形自動整形、Todo)"
 GROUP_3_TARGETS=(
   "InfiniteCanvasAppUITests/ObjectInteractionUITests"
+  "InfiniteCanvasAppUITests/UnifiedSelectionUITests"
+  "InfiniteCanvasAppUITests/LassoSelectionUITests"
+  "InfiniteCanvasAppUITests/StickyNoteUITests"
+  "InfiniteCanvasAppUITests/ConnectorUITests"
+  "InfiniteCanvasAppUITests/RotationUITests"
   "InfiniteCanvasAppUITests/FontSizeUITests"
   "InfiniteCanvasAppUITests/DragDropUITests"
   "InfiniteCanvasAppUITests/ShapeAssistUITests"
@@ -183,6 +188,7 @@ GROUP_8_TARGETS=(
 GROUP_9_DESC="[Group 9: フリーフォーム/システム UI テスト] キャンバスパン・ズーム、ストアリセット、全体ウォークスルー"
 GROUP_9_TARGETS=(
   "InfiniteCanvasAppUITests/InfiniteCanvasFreeformUITests"
+  "InfiniteCanvasAppUITests/ZoomToFitUITests"
   "InfiniteCanvasAppUITests/StoreResetUITests"
   "InfiniteCanvasAppUITests/AppWalkthroughUITests"
 )

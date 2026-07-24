@@ -38,6 +38,7 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
     let onDrawingChanged: () -> Void
     let onViewportChanged: (CanvasViewport) -> Void
     let onObjectFrameChanged: (NSManagedObjectID, CGRect) -> Void
+    let onObjectRotationChanged: (NSManagedObjectID, CGFloat) -> Void
     let onObjectTextChanged: (NSManagedObjectID, String) -> Void
     let onObjectTodoChanged: (NSManagedObjectID, [TodoItem]) -> Void
     let onObjectDeleted: (NSManagedObjectID) -> Void
@@ -125,6 +126,9 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
         // オブジェクト操作の書き戻し(常に最新の parent を経由させる)
         container.objectLayer.onFrameChanged = { [weak coordinator] id, frame in
             coordinator?.parent.onObjectFrameChanged(id, frame)
+        }
+        container.objectLayer.onRotationChanged = { [weak coordinator] id, rotation in
+            coordinator?.parent.onObjectRotationChanged(id, rotation)
         }
         container.objectLayer.onTextChanged = { [weak coordinator] id, text in
             coordinator?.parent.onObjectTextChanged(id, text)
@@ -393,6 +397,7 @@ struct PagedCanvasRepresentable: UIViewRepresentable {
                         frame: object.contentFrame,
                         text: object.text ?? "",
                         fontSize: object.fontSize > 0 ? object.fontSize : 24,
+                        rotation: object.rotation,
                         image: image,
                         isLocked: object.isLocked,
                         isUserLocked: object.isUserLocked,

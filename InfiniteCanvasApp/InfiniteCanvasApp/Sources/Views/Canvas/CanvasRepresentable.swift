@@ -84,16 +84,20 @@ struct PagedLayoutCalculator: Equatable {
 }
 
 
-/// PKCanvasView を「巨大キャンバス + ズーム」として構成する UIViewRepresentable。
-/// PKCanvasView は UIScrollView のサブクラスなので、巨大な contentSize と
-/// ズーム設定だけで疑似無限キャンバス(100,000 x 100,000 pt)を実現する。
+/// PKCanvasView を「動的に拡張するキャンバス + ズーム」として構成する UIViewRepresentable。
+/// PKCanvasView は UIScrollView のサブクラスなので、contentSize とズーム設定だけで
+/// 無限キャンバスを実現する。ワールドサイズ(contentSize の一辺)はコンテンツの外接矩形に
+/// 合わせて `Coordinator.worldSize` が動的に伸ばす(`DynamicCanvasBounds` 参照)。
+/// 右・下方向は contentSize を伸ばすだけ、左・上方向は原点リベース(座標系全体の平行移動)で
+/// 対応するため、固定サイズの壁に当たることはない。
 /// ズームすると描画・背景パターンごとスケーリングされる(要件②)。
 struct CanvasRepresentable: UIViewRepresentable {
-    static let canvasSize: CGFloat = 100_000
-
     @Binding var drawing: PKDrawing
     let pkTool: PKTool
     let isSelectMode: Bool
+    /// 投げ縄選択モード(`.lasso` ツール中)。true のとき PencilKit の描画/投げ縄ジェスチャを
+    /// 無効化し、自前ジェスチャでインク+オブジェクトを一括選択する(infinite ノートのみ)。
+    let isLassoSelectionMode: Bool
     /// タップ位置配置モードのツール(.text / .todo)。nil のときは通常(描画/選択)。
     let placementTool: CanvasTool?
     /// 配置モードでキャンバスをタップしたとき(ツール, コンテンツ座標)。
@@ -120,6 +124,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onDrawingChanged: () -> Void
     let onViewportChanged: (CanvasViewport) -> Void
     let onObjectFrameChanged: (NSManagedObjectID, CGRect) -> Void
+    /// 回転確定の保存(rotation 角・Undo あり)
+    let onObjectRotationChanged: (NSManagedObjectID, CGFloat) -> Void
     let onObjectTextChanged: (NSManagedObjectID, String) -> Void
     /// Todoリストの項目変更の保存(Undo あり)
     let onObjectTodoChanged: (NSManagedObjectID, [TodoItem]) -> Void
@@ -132,6 +138,9 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onLassoObjectsMoved: (CGRect, CGVector) -> Void
     /// 投げ縄でインクを削除したとき(削除された領域)。領域に重なるオブジェクトも削除する
     let onLassoObjectsDeleted: (CGRect) -> Void
+    /// 無限キャンバスの原点リベースで座標系全体が平行移動したとき(delta)。
+    /// オブジェクト(Core Data)側の x/y にも同じ量を加算して座標を合わせる(内部実装の詳細のため Undo 対象外)。
+    let onCanvasRebased: (CGVector) -> Void
     /// ノートリンクのダブルタップでリンク先ノートを開く要求
     let onNoteLinkActivated: (NSManagedObjectID) -> Void
     /// 図形のダブルタップで編集ポップオーバーを開く要求
@@ -146,6 +155,8 @@ struct CanvasRepresentable: UIViewRepresentable {
     let onGroupObjects: ([NSManagedObjectID]) -> Void
     /// グループを解除する要求
     let onUngroupObjects: ([NSManagedObjectID]) -> Void
+    /// 選択中の2オブジェクトをコネクタ線で接続する要求
+    let onConnectObjects: ([NSManagedObjectID]) -> Void
     /// 通常ノートで、最後のページを超えて横に引っ張ったときにページを1枚追加する要求
     let onAppendPage: () -> Void
     /// オブジェクトの選択状態が変わったとき(true=何か選択中 / false=未選択)。
@@ -161,6 +172,10 @@ struct CanvasRepresentable: UIViewRepresentable {
     let resetZoomRequested: Bool
     /// リセットを処理したら呼ぶ(要求元が false へ戻す)
     let onZoomResetHandled: () -> Void
+    /// コンテンツ全体を画面に収める(Zoom to Fit)要求(左上バッジのメニューから、infinite のみ)。
+    let zoomToFitRequested: Bool
+    /// 全体表示を処理したら呼ぶ(要求元が false へ戻す)
+    let onZoomToFitHandled: () -> Void
 
     /// 通常ノートのページ配置電卓(見開き × スクロール方向)
     private var layout: PagedLayoutCalculator {
@@ -171,26 +186,22 @@ struct CanvasRepresentable: UIViewRepresentable {
         )
     }
 
-    /// ノート形式に応じたキャンバスのコンテンツサイズ
-    private var contentSize: CGSize {
-        switch noteType {
-        case .infinite:
-            return CGSize(width: Self.canvasSize, height: Self.canvasSize)
-        case .paged:
-            return layout.contentSize
-        }
-    }
-
-    /// コンテンツサイズ・背景レイヤーのフレーム・ページ描画・スクロール方向を現在の形式へ合わせる。
-    /// make と update の両方から呼ぶ(冪等)。
+    /// 背景レイヤーのフレーム・ページ描画・スクロール方向を現在の形式へ合わせる。
+    /// make と update の両方から呼ぶ(冪等)。無限キャンバスの contentSize/フレーム/
+    /// スクロール制限は動的ワールドサイズに依存するため、ここでは扱わず
+    /// `Coordinator.refreshInfiniteWorld(in:)` が別途管理する。
     private func applyLayout(to container: CanvasContainerUIView) {
-        let size = contentSize
         let canvas = container.canvasView
-        canvas.contentSize = size
-        container.patternView.frame = CGRect(origin: .zero, size: size)
-        container.objectLayer.frame = CGRect(origin: .zero, size: size)
 
-        // オブジェクト層のクリップ: 10万pt四方の無限キャンバス層で masksToBounds を有効にすると、
+        // 通常ノートのみ、ここで contentSize を確定する(ページ数・レイアウトから決定論的に計算できる)。
+        if noteType == .paged {
+            let size = layout.contentSize
+            canvas.contentSize = size
+            container.patternView.frame = CGRect(origin: .zero, size: size)
+            container.objectLayer.frame = CGRect(origin: .zero, size: size)
+        }
+
+        // オブジェクト層のクリップ: 無限キャンバス層(ワールド全域)で masksToBounds を有効にすると、
         // ズーム時の実効ピクセルが GPU のレンダバッファ上限を超えて層ごと描画が黙って失敗し、
         // オブジェクトが全て見えなくなる。無限はクリップ不要(層=キャンバス全域)なので無効化する。
         container.objectLayer.clipsToBounds = (noteType == .paged)
@@ -219,8 +230,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                 canvas.minimumZoomScale = min(pagedMinimumZoom(for: canvas), canvas.maximumZoomScale)
             case .infinite:
                 canvas.minimumZoomScale = 0.1
-                // フリーボードに合わせて上限 400%
-                canvas.maximumZoomScale = 4.0
+                // フリーボードに合わせて上限 500%
+                canvas.maximumZoomScale = 5.0
             }
         }
 
@@ -238,12 +249,12 @@ struct CanvasRepresentable: UIViewRepresentable {
             noteType: noteType, layout: layout,
             style: backgroundStyle, pageColor: pageColor
         )
-
-        applyInfiniteScrollLimit(to: container)
     }
 
     /// 無限キャンバスのコンテンツ外接矩形(描画+オブジェクト)。コンテンツが無ければ nil。
-    private var infiniteContentUnion: CGRect? {
+    /// `Coordinator.refreshInfiniteWorld(in:)` がワールドサイズ・原点リベース・
+    /// スクロール制限の判定にすべてこれを使う(単一の情報源)。
+    fileprivate var infiniteContentUnion: CGRect? {
         var union = CGRect.null
         let drawingBounds = drawing.bounds
         if !drawingBounds.isNull, !drawingBounds.isEmpty {
@@ -253,37 +264,6 @@ struct CanvasRepresentable: UIViewRepresentable {
             union = union.union(object.contentFrame)
         }
         return union.isNull ? nil : union
-    }
-
-    /// 無限キャンバスのスクロール範囲を「コンテンツ+余白1画面分」へ制限する(Freeform 風)。
-    /// 描画・オブジェクトの変化(applyLayout 経由)、ズーム、bounds 変化のたびに呼び直す。
-    fileprivate func applyInfiniteScrollLimit(to container: CanvasContainerUIView) {
-        guard noteType == .infinite else { return }
-        let canvas = container.canvasView
-        guard canvas.bounds.width > 0, canvas.bounds.height > 0 else { return }
-        let allowed = InfiniteScrollLimiter.allowedRect(
-            contentUnion: infiniteContentUnion,
-            viewportSize: canvas.bounds.size,
-            zoomScale: canvas.zoomScale,
-            canvasSize: Self.canvasSize
-        )
-        canvas.contentInset = InfiniteScrollLimiter.insets(
-            allowedRect: allowed, zoomScale: canvas.zoomScale, canvasSize: Self.canvasSize
-        )
-    }
-
-    /// 現在の許可範囲で contentOffset をクランプする(復元・リセット等のプログラム設定用)
-    fileprivate func clampedInfiniteOffset(_ offset: CGPoint, for canvas: UIScrollView) -> CGPoint {
-        let allowed = InfiniteScrollLimiter.allowedRect(
-            contentUnion: infiniteContentUnion,
-            viewportSize: canvas.bounds.size,
-            zoomScale: canvas.zoomScale,
-            canvasSize: Self.canvasSize
-        )
-        return InfiniteScrollLimiter.clampedOffset(
-            offset, allowedRect: allowed,
-            zoomScale: canvas.zoomScale, viewportSize: canvas.bounds.size
-        )
     }
 
     func makeUIView(context: Context) -> CanvasContainerUIView {
@@ -298,6 +278,11 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.backgroundColor = containerBackgroundColor
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)
+        if noteType == .infinite {
+            // bounds 未確定でもコンテンツ量だけでワールドサイズの初期値を確保しておく
+            // (bounds 確定後に async ブロックで正確に計算し直す)。
+            context.coordinator.refreshInfiniteWorld(in: container)
+        }
         context.coordinator.lastPageCount = pageCount
         context.coordinator.lastIsTwoPage = isTwoPageLayout
         context.coordinator.lastIsHorizontal = isHorizontalScroll
@@ -308,6 +293,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         let coordinator = context.coordinator
         container.objectLayer.onFrameChanged = { [weak coordinator] id, frame in
             coordinator?.parent.onObjectFrameChanged(id, frame)
+        }
+        container.objectLayer.onRotationChanged = { [weak coordinator] id, rotation in
+            coordinator?.parent.onObjectRotationChanged(id, rotation)
         }
         container.objectLayer.onTextChanged = { [weak coordinator] id, text in
             coordinator?.parent.onObjectTextChanged(id, text)
@@ -345,10 +333,27 @@ struct CanvasRepresentable: UIViewRepresentable {
         container.objectLayer.onUngroupObjects = { [weak coordinator] ids in
             coordinator?.parent.onUngroupObjects(ids)
         }
+        container.objectLayer.onConnectObjects = { [weak coordinator] ids in
+            coordinator?.parent.onConnectObjects(ids)
+        }
         // 選択状態の変化を SwiftUI(PenToolState.isSelectMode)へ伝える。
         // これが選択モード(描画停止・単指操作)の真実のソースになる。
         container.objectLayer.onSelectionChanged = { [weak coordinator] hasSelection in
             coordinator?.parent.onSelectionChanged(hasSelection)
+        }
+
+        // 自前投げ縄: 描画ジェスチャ → 選択計算、統一枠の移動・削除でインク側を変換する。
+        container.onLassoPan = { [weak coordinator, weak container] gesture in
+            guard let coordinator, let container else { return }
+            coordinator.handleLassoPan(gesture, in: container)
+        }
+        container.objectLayer.onLassoStrokesMove = { [weak coordinator, weak container] t, state in
+            guard let coordinator, let container else { return }
+            coordinator.moveLassoStrokes(t, state: state, in: container)
+        }
+        container.objectLayer.onLassoStrokesDelete = { [weak coordinator, weak container] in
+            guard let coordinator, let container else { return }
+            coordinator.deleteLassoStrokes(in: container)
         }
 
         // 初期ビューポート(保存がなければ形式ごとの初期位置)
@@ -367,7 +372,7 @@ struct CanvasRepresentable: UIViewRepresentable {
             } else if noteType == .paged {
                 fitPaged(canvas)  // ページを画面にフィット + 先頭ページへ
             } else {
-                let size = Self.canvasSize
+                let size = context.coordinator.worldSize
                 canvas.contentOffset = CGPoint(
                     x: (size - canvas.bounds.width) / 2,
                     y: (size - canvas.bounds.height) / 2
@@ -375,9 +380,9 @@ struct CanvasRepresentable: UIViewRepresentable {
             }
             if noteType == .paged { centerPagedContent(canvas) }
             if noteType == .infinite {
-                // bounds 確定後にスクロール制限を計算し直し、復元位置も範囲内へ収める
-                applyInfiniteScrollLimit(to: container)
-                canvas.contentOffset = clampedInfiniteOffset(canvas.contentOffset, for: canvas)
+                // bounds 確定後にワールドサイズ・スクロール制限を計算し直し、復元位置も範囲内へ収める
+                context.coordinator.refreshInfiniteWorld(in: container)
+                canvas.contentOffset = context.coordinator.clampedInfiniteOffset(canvas.contentOffset, for: canvas)
             }
             // 復元したズームをスナップ閾値・背景タイル解像度へ反映
             container.objectLayer.applyZoom(canvas.zoomScale)
@@ -438,7 +443,7 @@ struct CanvasRepresentable: UIViewRepresentable {
     /// 現在のズームでの通常ノート用 contentInset(横断方向センタリング + 端の余白)
     private func pagedContentInset(for canvas: UIScrollView) -> UIEdgeInsets? {
         guard noteType == .paged else { return nil }
-        let size = contentSize
+        let size = layout.contentSize
         if isHorizontalScroll {
             let contentH = size.height * canvas.zoomScale
             let vInset = max(0, (canvas.bounds.height - contentH) / 2)
@@ -458,13 +463,20 @@ struct CanvasRepresentable: UIViewRepresentable {
         canvas.tool = pkTool
         container.backgroundColor = containerBackgroundColor
         container.isSelectMode = isSelectMode
+        // 投げ縄選択モード(infinite のみ): PencilKit の描画/投げ縄ジェスチャを止め、自前ジェスチャに切り替える。
+        let lassoActive = isLassoSelectionMode && noteType == .infinite
+        container.isLassoMode = lassoActive
         // タップ位置配置モード(テキスト/Todo): 手書きジェスチャを止めてタップ配置に切り替える。
         container.placementTool = placementTool
         container.onPlaceObject = onPlaceObject
-        canvas.drawingGestureRecognizer.isEnabled = (placementTool == nil)
+        canvas.drawingGestureRecognizer.isEnabled = (placementTool == nil && !lassoActive)
         container.objectLayer.backgroundStyle = backgroundStyle
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)  // 背景スタイル・用紙色・ページ数・レイアウトの変化を反映
+        if noteType == .infinite {
+            // 描画・オブジェクトの変化のたびにワールドサイズ(拡張/原点リベース)を再判定する
+            context.coordinator.refreshInfiniteWorld(in: container)
+        }
 
         // レイアウト設定(見開き / スクロール方向)が変わったら、安全に再フィット + 再センタリング。
         // ページ数の変化は含めない(それはページ追加スクロールで扱う)。
@@ -533,11 +545,11 @@ struct CanvasRepresentable: UIViewRepresentable {
                         )
                         canvas.contentOffset = CGPoint(x: offsetX, y: -PageMetrics.margin)
                     } else {
-                        let size = Self.canvasSize
-                        // スクロール制限を新ズームで計算し直し、中央がコンテンツから遠い場合は
-                        // 許可範囲(コンテンツ+余白)内へクランプする
-                        self.applyInfiniteScrollLimit(to: container)
-                        canvas.contentOffset = self.clampedInfiniteOffset(
+                        // ワールドサイズ・スクロール制限を新ズームで計算し直し、中央がコンテンツから
+                        // 遠い場合は許可範囲(コンテンツ+余白)内へクランプする
+                        context.coordinator.refreshInfiniteWorld(in: container)
+                        let size = context.coordinator.worldSize
+                        canvas.contentOffset = context.coordinator.clampedInfiniteOffset(
                             CGPoint(
                                 x: (size - canvas.bounds.width) / 2,
                                 y: (size - canvas.bounds.height) / 2
@@ -549,6 +561,26 @@ struct CanvasRepresentable: UIViewRepresentable {
                 container.objectLayer.applyZoom(1.0)
                 container.patternView.applyZoom(1.0)
                 self.onZoomResetHandled()
+            }
+        }
+
+        // コンテンツ全体を画面に収める(Zoom to Fit、infinite のみ)
+        if zoomToFitRequested, noteType == .infinite {
+            DispatchQueue.main.async {
+                context.coordinator.refreshInfiniteWorld(in: container)
+                if let fit = ZoomToFit.fit(
+                    contentUnion: infiniteContentUnion, viewportSize: canvas.bounds.size,
+                    minZoom: canvas.minimumZoomScale, maxZoom: canvas.maximumZoomScale
+                ) {
+                    UIView.animate(withDuration: 0.3) {
+                        canvas.zoomScale = fit.zoomScale
+                        context.coordinator.refreshInfiniteWorld(in: container)
+                        canvas.contentOffset = context.coordinator.clampedInfiniteOffset(fit.contentOffset, for: canvas)
+                        container.objectLayer.applyZoom(fit.zoomScale)
+                        container.patternView.applyZoom(fit.zoomScale)
+                    }
+                }
+                self.onZoomToFitHandled()
             }
         }
 
@@ -580,10 +612,19 @@ struct CanvasRepresentable: UIViewRepresentable {
         /// ページ数はここに含めない(ページ追加はスクロール処理側で扱う)
         var lastIsTwoPage = false
         var lastIsHorizontal = false
+        /// 無限キャンバスの現在のワールドサイズ(コンテンツ座標、正方形の一辺)。
+        /// コンテンツ+マージンに応じて伸びるのみで、縮小はしない(削除操作でジャンプしないように)。
+        var worldSize: CGFloat = DynamicCanvasBounds.initialWorldSize
         /// 図形置換・マーカー背面化で drawing を差し替える間の再入を無視するフラグ(無限再描画ループ防止)
         private var isReplacingDrawing = false
         /// 投げ縄でのインク移動・削除を差分検知するための直前の描画
         private var previousDrawing = PKDrawing()
+        /// 自前投げ縄: ドラッグ中の頂点列(コンテンツ座標)。自由曲線/範囲マーキーの両方に使う。
+        private var lassoPoints: [CGPoint] = []
+        /// 自前投げ縄: 現在の一括選択(ストローク index + オブジェクト ID)
+        private var lassoSelection = SelectionSession()
+        /// 自前投げ縄: 統一枠ドラッグでのインク移動の基準描画(移動開始時)
+        private var lassoMoveStartDrawing: PKDrawing?
         /// スクロール/ズームのデリゲート処理でレイヤーへアクセスするための弱参照
         private weak var container: CanvasContainerUIView?
         /// image / pdf のレンダリング結果キャッシュ(payload のデコードは1回だけ)
@@ -608,11 +649,87 @@ struct CanvasRepresentable: UIViewRepresentable {
         private func handleBoundsChange() {
             guard let container else { return }
             if parent.noteType == .infinite {
-                parent.applyInfiniteScrollLimit(to: container)
+                refreshInfiniteWorld(in: container)
                 return
             }
             guard let inset = parent.pagedContentInset(for: container.canvasView) else { return }
             container.canvasView.contentInset = inset
+        }
+
+        // MARK: - 無限キャンバスの動的ワールド管理
+
+        /// 無限キャンバスのワールドサイズ(= contentSize の一辺)を、現在のコンテンツに合わせて
+        /// 更新する。右・下方向は worldSize を伸ばすだけ、左・上方向は端に近づいたら
+        /// 原点リベース(ストローク・オブジェクト座標・contentOffset を一括平行移動)で対応する。
+        /// applyLayout 相当の反映(contentSize/フレーム/スクロール制限)もここでまとめて行う。
+        /// 描画・オブジェクトの変化、ズーム、bounds 変化のたびに呼び直す(冪等)。
+        func refreshInfiniteWorld(in container: CanvasContainerUIView) {
+            guard parent.noteType == .infinite else { return }
+            if let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: parent.infiniteContentUnion) {
+                rebaseOrigin(by: delta, in: container)
+            }
+            worldSize = DynamicCanvasBounds.expandedWorldSize(
+                contentUnion: parent.infiniteContentUnion, currentWorldSize: worldSize
+            )
+            applyWorldSize(to: container)
+        }
+
+        /// worldSize をキャンバスの contentSize・背景/オブジェクトレイヤーのフレーム・
+        /// スクロール制限(InfiniteScrollLimiter)へ反映する。
+        private func applyWorldSize(to container: CanvasContainerUIView) {
+            let canvas = container.canvasView
+            let size = CGSize(width: worldSize, height: worldSize)
+            if canvas.contentSize != size {
+                canvas.contentSize = size
+                container.patternView.frame = CGRect(origin: .zero, size: size)
+                container.objectLayer.frame = CGRect(origin: .zero, size: size)
+            }
+            guard canvas.bounds.width > 0, canvas.bounds.height > 0 else { return }
+            let allowed = InfiniteScrollLimiter.allowedRect(
+                contentUnion: parent.infiniteContentUnion,
+                viewportSize: canvas.bounds.size, zoomScale: canvas.zoomScale, canvasSize: worldSize
+            )
+            canvas.contentInset = InfiniteScrollLimiter.insets(
+                allowedRect: allowed, zoomScale: canvas.zoomScale, canvasSize: worldSize
+            )
+        }
+
+        /// 現在の許可範囲で contentOffset をクランプする(復元・リセット等のプログラム設定用)
+        func clampedInfiniteOffset(_ offset: CGPoint, for canvas: UIScrollView) -> CGPoint {
+            let allowed = InfiniteScrollLimiter.allowedRect(
+                contentUnion: parent.infiniteContentUnion,
+                viewportSize: canvas.bounds.size, zoomScale: canvas.zoomScale, canvasSize: worldSize
+            )
+            return InfiniteScrollLimiter.clampedOffset(
+                offset, allowedRect: allowed,
+                zoomScale: canvas.zoomScale, viewportSize: canvas.bounds.size
+            )
+        }
+
+        /// 原点リベース: コンテンツが左・上端の余白を切ったら、ストローク・オブジェクト座標・
+        /// contentOffset を delta だけ一括平行移動し、見た目を変えずに原点を再定義する
+        /// (座標を負にできない PKCanvasView の制約下で、左・上方向への無限拡張を可能にする)。
+        /// 内部座標系の実装詳細でありユーザー操作ではないため、Undo には登録しない。
+        private func rebaseOrigin(by delta: CGVector, in container: CanvasContainerUIView) {
+            let canvas = container.canvasView
+            let transform = CGAffineTransform(translationX: delta.dx, y: delta.dy)
+
+            isReplacingDrawing = true
+            let shifted = canvas.drawing.transformed(using: transform)
+            canvas.drawing = shifted
+            isCanvasSourceOfTruth = true
+            parent.drawing = shifted
+            isCanvasSourceOfTruth = false
+            previousDrawing = shifted
+            lastStrokeCount = shifted.strokes.count
+            isReplacingDrawing = false
+
+            parent.onCanvasRebased(delta)
+
+            canvas.contentOffset = CGPoint(
+                x: canvas.contentOffset.x + delta.dx * canvas.zoomScale,
+                y: canvas.contentOffset.y + delta.dy * canvas.zoomScale
+            )
         }
 
         // MARK: - スクロール/ズーム(UIScrollViewDelegate 経由。KVO は使わない)
@@ -703,9 +820,9 @@ struct CanvasRepresentable: UIViewRepresentable {
                let inset = parent.pagedContentInset(for: canvas) {
                 canvas.contentInset = inset
             }
-            // 無限キャンバスはズームでスクロール制限(余白1画面分)を計算し直す
+            // 無限キャンバスはズームでワールドサイズ・スクロール制限を計算し直す
             if parent.noteType == .infinite, let container {
-                parent.applyInfiniteScrollLimit(to: container)
+                refreshInfiniteWorld(in: container)
             }
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
@@ -806,12 +923,148 @@ struct CanvasRepresentable: UIViewRepresentable {
             }
         }
 
+        // MARK: - 自前投げ縄によるインク+オブジェクト一括選択(指示書 2.2「ドラッグおよび投げ縄」)
+
+        /// ドラッグの点列を「自由曲線が十分な面積で囲めている」なら閉多角形へ、
+        /// そうでなければ(直線ドラッグ等)外接矩形のマーキーへフォールバックしてポリゴンを作る。
+        private func lassoPolygon() -> (polygon: CGPath, bounds: CGRect)? {
+            let bounds = LassoHitTesting.boundingBox(lassoPoints)
+            guard bounds.width > 4, bounds.height > 4 else { return nil }
+            // 面積が外接矩形の20%以上なら自由曲線として扱い、未満なら範囲マーキーへ。
+            let area = LassoHitTesting.polygonArea(lassoPoints)
+            if lassoPoints.count >= 3, area >= bounds.width * bounds.height * 0.2,
+               let freeform = LassoHitTesting.polygon(from: lassoPoints) {
+                return (freeform, bounds)
+            }
+            return (LassoHitTesting.polygon(from: bounds), bounds)
+        }
+
+        /// 投げ縄ドラッグの各段階を処理する。座標は objectLayer(コンテンツ空間)で読む。
+        func handleLassoPan(_ gesture: UIPanGestureRecognizer, in container: CanvasContainerUIView) {
+            let point = gesture.location(in: container.objectLayer)
+            switch gesture.state {
+            case .began:
+                container.objectLayer.clearLassoSelection()
+                lassoSelection = SelectionSession()
+                lassoPoints = [point]
+            case .changed:
+                lassoPoints.append(point)
+                container.objectLayer.updateLassoDrawing(points: lassoPoints)
+            case .ended:
+                lassoPoints.append(point)
+                finishLasso(in: container)
+            case .cancelled, .failed:
+                container.objectLayer.lassoView.clear()
+            default:
+                break
+            }
+        }
+
+        /// 範囲を確定してインクストローク + オブジェクトを一括選択し、統一枠を表示する。
+        private func finishLasso(in container: CanvasContainerUIView) {
+            guard let (polygon, rect) = lassoPolygon() else {
+                container.objectLayer.lassoView.clear(); return
+            }
+
+            // インク: サンプル点の6割以上が内側のストロークを選ぶ(renderBounds で早期除外)
+            var indices: Set<Int> = []
+            var strokeBounds: [CGRect] = []
+            for (i, stroke) in container.canvasView.drawing.strokes.enumerated() {
+                let rb = stroke.renderBounds
+                guard LassoHitTesting.canIntersect(rb, lassoBounds: rect) else { continue }
+                if LassoHitTesting.strokeIsSelected(samplePoints: sampledPoints(of: stroke), inside: polygon) {
+                    indices.insert(i); strokeBounds.append(rb)
+                }
+            }
+
+            // オブジェクト: 中心が内側のものを選ぶ(コネクタは位置が派生値のため除外)
+            var objectIDs: Set<NSManagedObjectID> = []
+            var objectFrames: [CGRect] = []
+            for object in parent.objects
+            where !object.isDeleted && object.managedObjectContext != nil && object.objectKind != .connector {
+                let frame = object.contentFrame
+                if LassoHitTesting.rectIsSelected(frame, inside: polygon) {
+                    objectIDs.insert(object.objectID); objectFrames.append(frame)
+                }
+            }
+
+            guard let box = SelectionSession.combinedBoundingBox(strokeBounds: strokeBounds, objectFrames: objectFrames) else {
+                container.objectLayer.lassoView.clear(); return
+            }
+            lassoSelection = SelectionSession(strokeIndices: indices, objectIDs: objectIDs)
+            container.objectLayer.beginLassoSelection(objectIDs: objectIDs, box: box)
+        }
+
+        /// PKStroke の描画点をコンテンツ座標のサンプル点列にする(stroke.transform 適用)。
+        private func sampledPoints(of stroke: PKStroke) -> [CGPoint] {
+            var points: [CGPoint] = []
+            for point in stroke.path.interpolatedPoints(by: .distance(8)) {
+                points.append(point.location.applying(stroke.transform))
+            }
+            return points
+        }
+
+        /// 選択ストロークを平行移動した描画を作る。
+        private func translatedDrawing(_ drawing: PKDrawing, by t: CGVector) -> PKDrawing {
+            var strokes = drawing.strokes
+            let tf = CGAffineTransform(translationX: t.dx, y: t.dy)
+            for i in lassoSelection.strokeIndices where strokes.indices.contains(i) {
+                strokes[i].transform = strokes[i].transform.concatenating(tf)
+            }
+            var out = drawing
+            out.strokes = strokes
+            return out
+        }
+
+        /// 統一枠ドラッグ中の選択ストロークの移動(.changed はプレビュー、.ended で1手 Undo 登録)。
+        func moveLassoStrokes(_ t: CGVector, state: UIGestureRecognizer.State, in container: CanvasContainerUIView) {
+            guard !lassoSelection.strokeIndices.isEmpty else { return }
+            switch state {
+            case .began:
+                lassoMoveStartDrawing = container.canvasView.drawing
+            case .changed:
+                guard let start = lassoMoveStartDrawing else { return }
+                // プレビュー: canvasView のみ差し替え(Undo 登録しない)
+                isReplacingDrawing = true
+                container.canvasView.drawing = translatedDrawing(start, by: t)
+                isReplacingDrawing = false
+            case .ended:
+                guard let start = lassoMoveStartDrawing else { return }
+                replaceDrawingWithUndoSupport(container.canvasView, to: translatedDrawing(start, by: t), from: start)
+                lassoMoveStartDrawing = nil
+            case .cancelled, .failed:
+                if let start = lassoMoveStartDrawing {
+                    isReplacingDrawing = true
+                    container.canvasView.drawing = start
+                    isReplacingDrawing = false
+                }
+                lassoMoveStartDrawing = nil
+            default:
+                break
+            }
+        }
+
+        /// 統一枠の削除ボタンで選択ストロークを削除する(オブジェクト削除と同一イベント=1 Undo グループ)。
+        func deleteLassoStrokes(in container: CanvasContainerUIView) {
+            guard !lassoSelection.strokeIndices.isEmpty else { return }
+            let old = container.canvasView.drawing
+            var next = old
+            next.strokes = old.strokes.enumerated()
+                .filter { !lassoSelection.strokeIndices.contains($0.offset) }
+                .map(\.element)
+            replaceDrawingWithUndoSupport(container.canvasView, to: next, from: old)
+            lassoSelection.strokeIndices = []
+        }
+
         // MARK: - オブジェクト同期(要件③)
 
         @MainActor
         func syncObjects(into layer: ObjectLayerUIView) {
             let activeObjects = parent.objects.filter { !$0.isDeleted && $0.managedObjectContext != nil }
-            let items = activeObjects
+            // コネクタは枠付きビューではなく線として別描画するため、通常オブジェクトから分離する。
+            let framedObjects = activeObjects.filter { $0.objectKind != .connector }
+            syncConnectorLines(from: activeObjects, into: layer)
+            let items = framedObjects
                 .sorted { $0.zOrder < $1.zOrder }
                 .map { object -> CanvasObjectItem in
                     var image: UIImage?
@@ -822,7 +1075,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         // サムネイルは渡さない(image は nil のまま)。
                         linkTitle = object.resolvedLinkedNote?.displayTitle ?? ""
                     } else if object.objectKind != .text && object.objectKind != .todo
-                                && object.objectKind != .shape && object.objectKind != .table {
+                                && object.objectKind != .shape && object.objectKind != .table
+                                && object.objectKind != .stickyNote {
                         if let cached = imageCache[object.objectID] {
                             image = cached
                         } else if let rendered = object.makeDisplayImage() {
@@ -836,6 +1090,7 @@ struct CanvasRepresentable: UIViewRepresentable {
                         frame: object.contentFrame,
                         text: object.text ?? "",
                         fontSize: object.fontSize > 0 ? object.fontSize : 24,
+                        rotation: object.rotation,
                         image: image,
                         isLocked: object.isLocked,
                         isUserLocked: object.isUserLocked,
@@ -843,7 +1098,8 @@ struct CanvasRepresentable: UIViewRepresentable {
                         linkTitle: linkTitle,
                         todoItems: object.objectKind == .todo ? object.todoItems : [],
                         shapePayload: object.objectKind == .shape ? object.shapePayload : nil,
-                        tablePayload: object.objectKind == .table ? object.tablePayload : nil
+                        tablePayload: object.objectKind == .table ? object.tablePayload : nil,
+                        stickyNotePayload: object.objectKind == .stickyNote ? object.stickyNotePayload : nil
                     )
                 }
             layer.sync(items: items)
@@ -851,6 +1107,35 @@ struct CanvasRepresentable: UIViewRepresentable {
             // 削除済みオブジェクトの画像キャッシュを解放する(imageCache がメモリリークしないように)
             let activeIDs = Set(activeObjects.map(\.objectID))
             imageCache = imageCache.filter { activeIDs.contains($0.key) }
+        }
+
+        /// コネクタ線を接続元/先の現在位置から算出してレイヤーへ渡す。
+        /// 接続元/先の UUID を frame に解決し、`ConnectorGeometry` で端点を求める。
+        /// どちらかの端点が欠けているコネクタは描かない(移動追従・削除追従はこれで成立する)。
+        @MainActor
+        private func syncConnectorLines(from objects: [CanvasObject], into layer: ObjectLayerUIView) {
+            var frameByUUID: [String: CGRect] = [:]
+            var objectByUUID: [String: NSManagedObjectID] = [:]
+            for object in objects where object.objectKind != .connector {
+                if let uuid = object.id?.uuidString {
+                    frameByUUID[uuid] = object.contentFrame
+                    objectByUUID[uuid] = object.objectID
+                }
+            }
+            var specs: [ConnectorLineSpec] = []
+            for object in objects where object.objectKind == .connector {
+                guard let payload = object.connectorPayload,
+                      let source = frameByUUID[payload.sourceID],
+                      let target = frameByUUID[payload.targetID] else { continue }
+                guard let sourceObj = objectByUUID[payload.sourceID],
+                      let targetObj = objectByUUID[payload.targetID] else { continue }
+                let (start, end) = ConnectorGeometry.endpoints(source: source, target: target)
+                specs.append(ConnectorLineSpec(
+                    id: object.objectID, sourceObjectID: sourceObj, targetObjectID: targetObj,
+                    start: start, end: end, hasArrow: payload.hasArrow
+                ))
+            }
+            layer.syncConnectors(specs)
         }
 
         /// 挿入直後のオブジェクトを選択し、テキストなら編集を開始する(1回だけ)
@@ -933,13 +1218,45 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         didSet {
             guard isSelectMode != oldValue else { return }
             objectLayer.isSelectMode = isSelectMode
-            canvasView.panGestureRecognizer.minimumNumberOfTouches = isSelectMode ? 2 : 1
+            updateScrollTouchRequirement()
         }
+    }
+
+    /// 投げ縄選択モード(`.lasso` ツール中、infinite のみ)。単指=自前投げ縄、2指=スクロール。
+    var isLassoMode = false {
+        didSet {
+            guard isLassoMode != oldValue else { return }
+            lassoPan.isEnabled = isLassoMode
+            updateScrollTouchRequirement()
+            if !isLassoMode { objectLayer.clearLassoSelection() }
+        }
+    }
+
+    /// 選択/投げ縄中は単指ドラッグをオブジェクト操作・投げ縄に使うため、スクロールは2指に限定する。
+    private func updateScrollTouchRequirement() {
+        canvasView.panGestureRecognizer.minimumNumberOfTouches = (isSelectMode || isLassoMode) ? 2 : 1
+    }
+
+    /// 自前投げ縄の描画ジェスチャ(指・Pencil 両対応、単指)。isLassoMode 中のみ有効。
+    private lazy var lassoPan: UIPanGestureRecognizer = {
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleLassoPan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = self
+        pan.isEnabled = false
+        return pan
+    }()
+    /// 投げ縄ジェスチャの各段階を Coordinator へ渡す(Coordinator が objectLayer 空間で座標を読む)。
+    var onLassoPan: ((UIPanGestureRecognizer) -> Void)?
+
+    @objc private func handleLassoPan(_ gesture: UIPanGestureRecognizer) {
+        onLassoPan?(gesture)
     }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        let canvasSize = CanvasRepresentable.canvasSize
+        // 初期サイズはプレースホルダ(makeUIView が直後に applyLayout/refreshInfiniteWorld で
+        // 実際のノート形式・コンテンツに応じたサイズへ上書きする)。
+        let canvasSize = DynamicCanvasBounds.initialWorldSize
 
         // PencilKit はダークモード時にインク色を自動反転する(黒⇄白)が、
         // 用紙色(白/黒)はアプリ側で管理しているため反転を止め、選んだ色のまま描く
@@ -970,6 +1287,7 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         // ノートリンクの「開く」ボタン上のタッチではストロークを始めさせない。
         drawingTouchGate.forward = canvasView.drawingGestureRecognizer.delegate
         canvasView.drawingGestureRecognizer.delegate = drawingTouchGate
+        canvasView.addGestureRecognizer(lassoPan)  // 自前投げ縄(isLassoMode 中のみ有効)
         addSubview(canvasView)
 
         // 背景 → オブジェクトの順でキャンバス最背面へ差し込む。
@@ -1018,6 +1336,10 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
             }
             return
         }
+        // 投げ縄選択中に「枠の外」をタップしたら選択解除(枠内・削除ボタンのタップは潰さない)
+        if objectLayer.hasLassoSelection, !objectLayer.lassoViewContains(contentPoint: point) {
+            objectLayer.clearLassoSelection()
+        }
         objectLayer.handleBackgroundTap(at: point)
     }
 
@@ -1025,6 +1347,15 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool { true }
+
+    /// 自前投げ縄は「空き領域(オブジェクト・投げ縄枠の上でない)」から始まったときだけ開始する。
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === lassoPan {
+            let point = lassoPan.location(in: objectLayer)
+            return !objectLayer.lassoShouldYield(atContentPoint: point)
+        }
+        return true
+    }
 }
 
 /// PKCanvasView の描画ジェスチャに差し込む delegate。ノートリンクの「開く」ボタン上で

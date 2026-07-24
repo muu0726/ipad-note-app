@@ -75,6 +75,31 @@ enum CanvasObjectUndo {
         bridge?.refresh()
     }
 
+    /// 回転角の変更(回転ハンドルのドラッグ確定時)
+    static func registerRotationChange(
+        objectUUID: UUID,
+        previousRotation: CGFloat,
+        in manager: UndoManager?,
+        context: NSManagedObjectContext,
+        bridge: CanvasUndoBridge?
+    ) {
+        guard let manager else { return }
+        manager.registerUndo(withTarget: context) { [weak manager, weak bridge] context in
+            MainActor.assumeIsolated {
+                guard let object = fetchObject(objectUUID, in: context) else { logMissingObject(objectUUID); return }
+                let current = object.rotation
+                object.rotation = previousRotation
+                object.updatedAt = .now
+                saveAndRefresh(context: context, bridge: bridge)
+                registerRotationChange(
+                    objectUUID: objectUUID, previousRotation: current,
+                    in: manager, context: context, bridge: bridge
+                )
+            }
+        }
+        bridge?.refresh()
+    }
+
     /// テキスト編集終了時の内容変更
     static func registerTextChange(
         objectUUID: UUID,

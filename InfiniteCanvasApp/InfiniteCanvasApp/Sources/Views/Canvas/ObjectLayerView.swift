@@ -9,9 +9,10 @@ final class NoteLinkOpenButton: UIButton {}
 struct CanvasObjectItem {
     let id: NSManagedObjectID
     let kind: CanvasObjectKind
-    var frame: CGRect        // コンテンツ空間
+    var frame: CGRect        // コンテンツ空間(回転前の論理フレーム)
     var text: String
     var fontSize: CGFloat
+    var rotation: CGFloat = 0  // 回転角(ラジアン)
     var image: UIImage?      // image / pdf のレンダリング済み画像(noteLink ではサムネイル)
     var isLocked: Bool = false  // システムロック(PDF 背景など): 完全非対話
     var isUserLocked: Bool = false  // ユーザーロック: 選択可・南京錠・移動/リサイズ/削除/編集不可
@@ -20,6 +21,7 @@ struct CanvasObjectItem {
     var todoItems: [TodoItem] = []  // todo: チェックリストの項目
     var shapePayload: ShapePayload? = nil  // shape: 図形パラメータ
     var tablePayload: TablePayload? = nil  // table: 表の構造
+    var stickyNotePayload: StickyNotePayload? = nil  // stickyNote: 付箋の色
 }
 
 /// テキスト / 画像 / PDF オブジェクトの表示・選択・移動・リサイズを担うレイヤー(要件③④)。
@@ -29,6 +31,8 @@ struct CanvasObjectItem {
 final class ObjectLayerUIView: UIView {
     // Core Data への書き戻しは Coordinator 経由で行う
     var onFrameChanged: ((NSManagedObjectID, CGRect) -> Void)?
+    /// 回転確定時の書き戻し(rotation 角・Undo あり)
+    var onRotationChanged: ((NSManagedObjectID, CGFloat) -> Void)?
     var onTextChanged: ((NSManagedObjectID, String) -> Void)?
     /// Todoリストの項目が変わったときの書き戻し
     var onTodoChanged: ((NSManagedObjectID, [TodoItem]) -> Void)?
@@ -53,6 +57,8 @@ final class ObjectLayerUIView: UIView {
     var onGroupObjects: (([NSManagedObjectID]) -> Void)?
     /// グループを解除する要求(渡された全 ID の parentGroupID を消す)
     var onUngroupObjects: (([NSManagedObjectID]) -> Void)?
+    /// 選択中の2オブジェクトをコネクタ線で接続する要求
+    var onConnectObjects: (([NSManagedObjectID]) -> Void)?
 
     /// 現在のズーム倍率。オブジェクトはコンテンツ空間に直接配置され、スクロール/ズーム追従は
     /// スクロールビュー(PKCanvasView)の合成に任せるため、この値はスナップ閾値・タッチ判定の
@@ -63,7 +69,26 @@ final class ObjectLayerUIView: UIView {
     /// 単体選択のときだけその ID(テキストツールバー表示・リサイズ・再タップ編集の判定に使う)
     var selectedID: NSManagedObjectID? { selectedIDs.count == 1 ? selectedIDs.first : nil }
     private var objectViews: [NSManagedObjectID: CanvasObjectUIView] = [:]
+    /// コネクタ線(2オブジェクトを結ぶ自動追従線)。オブジェクトの下に置く。
+    private var connectorViews: [NSManagedObjectID: ConnectorLineView] = [:]
+    /// コネクタ id → (接続元, 接続先, 矢印)。ドラッグ中に端点をライブ再計算するために保持する。
+    private var connectorEndpoints: [NSManagedObjectID: (source: NSManagedObjectID, target: NSManagedObjectID, hasArrow: Bool)] = [:]
     private let guideLayer = CAShapeLayer()
+    /// 複数選択(2個以上)時に出す統一バウンディングボックス + 8方向リサイズハンドル。
+    private let selectionOverlay = SelectionOverlayView()
+    /// リサイズ開始時の各オブジェクトのフレームと選択枠(比例スケールの基準)。
+    private var resizeStartFrames: [NSManagedObjectID: CGRect] = [:]
+    private var resizeStartBox: CGRect = .zero
+
+    /// 自前投げ縄でインク+オブジェクトを一括選択したときのオーバーレイ(投げ縄パス+統一枠+削除)。
+    let lassoView = LassoSelectionView()
+    /// 投げ縄選択中は複数選択のリサイズ枠(selectionOverlay)を抑止する(統一枠は lassoView が担う)。
+    private var suppressResizeOverlay = false
+    /// 投げ縄選択のインク側(ストローク)の移動・削除を Coordinator へ委譲するクロージャ。
+    var onLassoStrokesMove: ((CGVector, UIGestureRecognizer.State) -> Void)?
+    var onLassoStrokesDelete: (() -> Void)?
+    /// 投げ縄選択のボックス移動開始時の基準ボックス。
+    private var lassoMoveStartBox: CGRect?
 
     /// グリッドスナップの有効判定に使う(白紙のときはグリッドへ吸着しない)
     var backgroundStyle: CanvasBackgroundStyle = .blank
@@ -87,6 +112,19 @@ final class ObjectLayerUIView: UIView {
         guideLayer.lineWidth = 1
         guideLayer.fillColor = nil
         layer.addSublayer(guideLayer)
+
+        selectionOverlay.frame = bounds
+        selectionOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        selectionOverlay.onResize = { [weak self] handle, translation, state in
+            self?.resizeSelection(handle: handle, translation: translation, state: state)
+        }
+        addSubview(selectionOverlay)
+
+        lassoView.frame = bounds
+        lassoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        lassoView.onMove = { [weak self] t, state in self?.moveLassoSelection(t, state: state) }
+        lassoView.onDelete = { [weak self] in self?.deleteLassoSelection() }
+        addSubview(lassoView)
     }
 
     @available(*, unavailable)
@@ -98,6 +136,11 @@ final class ObjectLayerUIView: UIView {
     /// スクロール・ズームによるオブジェクトの再配置はスクロールビューの合成が行うため不要。
     func applyZoom(_ zoom: CGFloat) {
         self.zoom = zoom
+        if !selectionOverlay.isHidden {
+            selectionOverlay.update(box: selectionOverlay.box, zoom: zoom)
+        }
+        lassoView.applyZoom(zoom)
+        for view in connectorViews.values { view.applyZoom(zoom) }
     }
 
     // MARK: - モデル同期
@@ -122,6 +165,51 @@ final class ObjectLayerUIView: UIView {
             view.apply(item)
             bringSubviewToFront(view)  // items は zOrder 昇順なので前面順が保たれる
         }
+        // オブジェクトを前面へ出したあとも統一枠は最前面に保つ(選択中のとき)
+        if !selectionOverlay.isHidden {
+            bringSubviewToFront(selectionOverlay)
+            // 移動/リサイズでフレームが変わった選択に追従(操作中でなければ再計算)
+            if resizeStartFrames.isEmpty { refreshSelectionOverlay() }
+        }
+        // 投げ縄の統一枠も最前面に保つ
+        if !lassoView.isHidden { bringSubviewToFront(lassoView) }
+        // コネクタ線は常にオブジェクトの背面へ
+        for view in connectorViews.values { sendSubviewToBack(view) }
+    }
+
+    /// コネクタ線を接続元/先の現在位置に合わせて同期する(Coordinator が端点を算出して渡す)。
+    func syncConnectors(_ specs: [ConnectorLineSpec]) {
+        let ids = Set(specs.map(\.id))
+        for (id, view) in connectorViews where !ids.contains(id) {
+            view.removeFromSuperview()
+            connectorViews[id] = nil
+            connectorEndpoints[id] = nil
+        }
+        for spec in specs {
+            let view: ConnectorLineView
+            if let existing = connectorViews[spec.id] {
+                view = existing
+            } else {
+                view = ConnectorLineView()
+                connectorViews[spec.id] = view
+                addSubview(view)
+            }
+            connectorEndpoints[spec.id] = (spec.sourceObjectID, spec.targetObjectID, spec.hasArrow)
+            view.update(start: spec.start, end: spec.end, hasArrow: spec.hasArrow, zoom: zoom)
+            sendSubviewToBack(view)  // 線はオブジェクトの下
+        }
+    }
+
+    /// ドラッグ中に、接続元/先オブジェクトの現在フレームからコネクタ端点をライブ再計算する(自動追従)。
+    func refreshConnectorPositions() {
+        guard !connectorEndpoints.isEmpty else { return }
+        for (id, ends) in connectorEndpoints {
+            guard let view = connectorViews[id],
+                  let source = objectViews[ends.source]?.contentFrame,
+                  let target = objectViews[ends.target]?.contentFrame else { continue }
+            let (start, end) = ConnectorGeometry.endpoints(source: source, target: target)
+            view.update(start: start, end: end, hasArrow: ends.hasArrow, zoom: zoom)
+        }
     }
 
     // MARK: - 選択(単体・複数・グループ)
@@ -142,10 +230,133 @@ final class ObjectLayerUIView: UIView {
         selectedIDs = ids
         // 単体/複数でリサイズハンドルの出方が変わるので、選択中の全ビューを更新する
         for id in ids { objectViews[id]?.refreshSelectionChrome() }
+        refreshSelectionOverlay()
         notifyTextSelection()
         if (!ids.isEmpty) != hadSelection {
             onSelectionChanged?(!ids.isEmpty)
         }
+    }
+
+    // MARK: - 統一選択枠(複数選択の一括リサイズ)
+
+    /// 選択集合のうち、移動・リサイズ可能な(非ロック)オブジェクトのフレーム。
+    private func selectableSelectedFrames() -> [NSManagedObjectID: CGRect] {
+        var frames: [NSManagedObjectID: CGRect] = [:]
+        for id in selectedIDs {
+            if let view = objectViews[id], !view.isMovementLocked {
+                frames[id] = view.contentFrame
+            }
+        }
+        return frames
+    }
+
+    /// 複数選択(非ロック2個以上)のとき統一枠を表示し、そうでなければ隠す。
+    /// 単体選択は従来どおり各オブジェクトの右下ハンドルでリサイズする(枠は出さない)。
+    private func refreshSelectionOverlay() {
+        // 投げ縄選択中は統一枠を lassoView が担うため、複数選択のリサイズ枠は出さない。
+        if suppressResizeOverlay { selectionOverlay.setActive(false); return }
+        let frames = selectableSelectedFrames()
+        guard frames.count >= 2, let box = SelectionGeometry.boundingBox(of: Array(frames.values)) else {
+            selectionOverlay.setActive(false)
+            return
+        }
+        selectionOverlay.setActive(true)
+        selectionOverlay.update(box: box, zoom: zoom)
+        bringSubviewToFront(selectionOverlay)
+    }
+
+    /// 統一枠のハンドルドラッグで選択全体を比例リサイズする。
+    /// 一括移動(moveSelection)と同じ「同一イベント内で複数 onFrameChanged → 1つの Undo グループ」パターン。
+    func resizeSelection(handle: SelectionHandle, translation t: CGVector, state: UIGestureRecognizer.State) {
+        switch state {
+        case .began:
+            resizeStartFrames = selectableSelectedFrames()
+            resizeStartBox = SelectionGeometry.boundingBox(of: Array(resizeStartFrames.values)) ?? .zero
+            for id in resizeStartFrames.keys { objectViews[id]?.setInteractingExternally(true) }
+        case .changed:
+            guard resizeStartBox.width > 0, resizeStartBox.height > 0 else { return }
+            let newBox = SelectionGeometry.resizedBox(resizeStartBox, handle: handle, translation: t)
+            for (id, start) in resizeStartFrames {
+                objectViews[id]?.moveContentFrame(to: SelectionGeometry.rescale(start, from: resizeStartBox, to: newBox))
+            }
+            refreshConnectorPositions()  // コネクタを追従
+            selectionOverlay.update(box: newBox, zoom: zoom)
+        case .ended, .cancelled, .failed:
+            for (id, _) in resizeStartFrames {
+                objectViews[id]?.setInteractingExternally(false)
+                if let frame = objectViews[id]?.contentFrame { onFrameChanged?(id, frame) }
+            }
+            resizeStartFrames = [:]
+            refreshSelectionOverlay()
+        default:
+            break
+        }
+    }
+
+    // MARK: - 自前投げ縄によるインク+オブジェクト一括選択
+
+    /// ドラッグ中の投げ縄パス(コンテンツ空間の頂点列)を描画する。
+    func updateLassoDrawing(points: [CGPoint]) {
+        bringSubviewToFront(lassoView)
+        lassoView.updateLassoPath(points)
+    }
+
+    /// 投げ縄確定: 囲んだオブジェクトを選択状態にし、統一枠(box=インク+オブジェクトの外接)を表示する。
+    /// リサイズ枠(selectionOverlay)は抑止し、統一枠は lassoView が担う。
+    func beginLassoSelection(objectIDs: Set<NSManagedObjectID>, box: CGRect) {
+        suppressResizeOverlay = true
+        setSelection(objectIDs)
+        lassoView.showSelection(box: box, zoom: zoom)
+        bringSubviewToFront(lassoView)
+    }
+
+    /// 投げ縄選択を解除する(選択解除・ツール変更・新しい投げ縄開始時)。
+    func clearLassoSelection() {
+        guard suppressResizeOverlay || !lassoView.isHidden else { return }
+        suppressResizeOverlay = false
+        lassoView.clear()
+        setSelection([])
+    }
+
+    /// 投げ縄選択中か。
+    var hasLassoSelection: Bool { !lassoView.isHidden && lassoView.box != nil }
+
+    /// コンテンツ座標が「投げ縄の当たり判定を横取りすべき要素(オブジェクト or 投げ縄枠)」の上か。
+    /// 自前投げ縄ジェスチャは、これが false(=空き領域)のときだけ開始する。
+    func lassoShouldYield(atContentPoint point: CGPoint) -> Bool {
+        if lassoViewContains(contentPoint: point) { return true }
+        for view in objectViews.values where view.frame.contains(point) { return true }
+        return false
+    }
+
+    /// コンテンツ座標が投げ縄の統一枠(ボックス内部 or 削除ボタン)の上か。
+    /// 背景タップでの選択解除は、これが false(=枠の外)のときだけ行う(削除ボタンのタップを潰さない)。
+    func lassoViewContains(contentPoint point: CGPoint) -> Bool {
+        !lassoView.isHidden && lassoView.point(inside: convert(point, to: lassoView), with: nil)
+    }
+
+    /// 統一枠ドラッグでインク+オブジェクトを一括移動する(オブジェクトは既存 moveSelection、インクは Coordinator)。
+    private func moveLassoSelection(_ t: CGVector, state: UIGestureRecognizer.State) {
+        switch state {
+        case .began:
+            lassoMoveStartBox = lassoView.box
+        case .changed:
+            if let start = lassoMoveStartBox {
+                lassoView.showSelection(box: start.offsetBy(dx: t.dx, dy: t.dy), zoom: zoom)
+            }
+        default:
+            break
+        }
+        moveSelection(translation: CGPoint(x: t.dx, y: t.dy), state: state)  // オブジェクト
+        onLassoStrokesMove?(t, state)                                        // インク(Coordinator)
+        if state == .ended || state == .cancelled || state == .failed { lassoMoveStartBox = nil }
+    }
+
+    /// 削除ボタンでインク+オブジェクトを一括削除する(同一イベントで1 Undo グループ)。
+    private func deleteLassoSelection() {
+        onLassoStrokesDelete?()  // インク(Coordinator)を先に
+        deleteSelection()        // オブジェクト
+        clearLassoSelection()
     }
 
     /// タップ選択: グループ化済みならグループ全体、そうでなければ単体を選択(置換)。
@@ -197,12 +408,18 @@ final class ObjectLayerUIView: UIView {
             for (id, start) in groupMoveStart {
                 objectViews[id]?.moveContentFrame(to: start.offsetBy(dx: t.x, dy: t.y))
             }
+            refreshConnectorPositions()  // コネクタを追従
+            if !selectionOverlay.isHidden,
+               let box = SelectionGeometry.boundingBox(of: Array(selectableSelectedFrames().values)) {
+                selectionOverlay.update(box: box, zoom: zoom)
+            }
         case .ended, .cancelled, .failed:
             for (id, _) in groupMoveStart {
                 objectViews[id]?.setInteractingExternally(false)
                 if let frame = objectViews[id]?.contentFrame { onFrameChanged?(id, frame) }
             }
             groupMoveStart = [:]
+            refreshSelectionOverlay()
         default:
             break
         }
@@ -318,8 +535,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
     private weak var layerView: ObjectLayerUIView?
     private var fontSize: CGFloat
+    /// 回転角(ラジアン)。描画時に center 周りの CGAffineTransform として適用する。
+    private var rotation: CGFloat
     private var isSelected = false
     private var gestureStartFrame: CGRect = .zero
+    /// 回転開始時の角度(ジェスチャの差分計算用)
+    private var rotationGestureStart: CGFloat = 0
     /// 移動用パン。選択済みのときだけ開始させる判定(gestureRecognizerShouldBegin)に使う
     private weak var movePan: UIPanGestureRecognizer?
 
@@ -329,6 +550,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     private let shapeView = ShapeContentView()
     private let tableView = TableObjectContentView()
     private let resizeHandle = UIView()
+    /// 単一選択時に上へ出す回転ハンドル
+    private let rotateHandle = UIView()
     /// ユーザーロック中に隅へ出す南京錠バッジ(タップで解除)
     private let lockBadge = UIButton(type: .system)
     private lazy var editMenuInteraction = UIEditMenuInteraction(delegate: self)
@@ -349,6 +572,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         self.parentGroupID = item.parentGroupID
         self.contentFrame = item.frame
         self.fontSize = item.fontSize
+        self.rotation = item.rotation
         self.layerView = layerView
         super.init(frame: .zero)
         // システムロック(PDF背景など)は移動・リサイズ・選択・削除・編集を一切受け付けない。
@@ -410,6 +634,26 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             }
             tableView.payload = item.tablePayload
             addSubview(tableView)
+        case .stickyNote:
+            let color = item.stickyNotePayload?.color ?? .yellow
+            backgroundColor = color.backgroundUIColor
+            layer.cornerRadius = 8
+            layer.shadowColor = UIColor.black.cgColor
+            layer.shadowOpacity = 0.2
+            layer.shadowRadius = 5
+            layer.shadowOffset = CGSize(width: 0, height: 3)
+            textView.isScrollEnabled = false
+            textView.backgroundColor = .clear
+            textView.textColor = color.textUIColor
+            textView.textAlignment = .center
+            textView.isEditable = false
+            textView.isUserInteractionEnabled = false  // 編集開始まで自分がタッチを受ける
+            textView.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+            textView.delegate = self
+            addSubview(textView)
+            updateTextAccessibility()
+        case .connector:
+            break  // コネクタは枠付きビューにならない(ConnectorLineView で線として描く)
         }
 
         // 選択チップ: リサイズハンドル(右下)。角に半分かかる配置
@@ -419,6 +663,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         resizeHandle.layer.borderColor = UIColor.systemBlue.cgColor
         resizeHandle.isHidden = true
         addSubview(resizeHandle)
+
+        // 回転ハンドル(上辺の上)。単一選択時のみ表示。
+        rotateHandle.backgroundColor = .systemBlue
+        rotateHandle.layer.cornerRadius = 11
+        rotateHandle.layer.borderWidth = 2
+        rotateHandle.layer.borderColor = UIColor.white.cgColor
+        rotateHandle.isHidden = true
+        rotateHandle.accessibilityIdentifier = "object-rotate-handle"
+        addSubview(rotateHandle)
 
         // 南京錠バッジ(ユーザーロック中のみ表示、タップで解除)。右上の角に半分かかる配置。
         let lockSymbol = UIImage(systemName: "lock.fill",
@@ -452,6 +705,9 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         let resizePan = UIPanGestureRecognizer(target: self, action: #selector(handleResizePan(_:)))
         resizePan.allowedTouchTypes = fingerOnly
         resizeHandle.addGestureRecognizer(resizePan)
+        let rotatePan = UIPanGestureRecognizer(target: self, action: #selector(handleRotatePan(_:)))
+        rotatePan.allowedTouchTypes = fingerOnly
+        rotateHandle.addGestureRecognizer(rotatePan)
 
         // 長押しで削除メニューを出す(要件: 画像等のオブジェクトは長押しで消す)
         addInteraction(editMenuInteraction)
@@ -482,6 +738,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // 表はセルのダブルタップでそのセルのテキスト編集に入る。
         if kind == .table {
             let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleTableCellDoubleTap(_:)))
+            doubleTap.numberOfTapsRequired = 2
+            doubleTap.allowedTouchTypes = fingerOnly
+            addGestureRecognizer(doubleTap)
+            tap.require(toFail: doubleTap)
+        }
+
+        // 付箋はダブルタップで即座にテキスト入力に入る(要件: 付箋)。
+        if kind == .stickyNote {
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleStickyEditDoubleTap))
             doubleTap.numberOfTapsRequired = 2
             doubleTap.allowedTouchTypes = fingerOnly
             addGestureRecognizer(doubleTap)
@@ -561,6 +826,14 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         tableView.frame = bounds
         resizeHandle.frame = CGRect(x: bounds.width - 11, y: bounds.height - 11, width: 22, height: 22)
         lockBadge.frame = CGRect(x: bounds.width - 11, y: -11, width: 22, height: 22)  // 右上の角
+        // 回転ハンドルは上辺の中央から少し上へ(コンテンツ空間で 28pt 上)
+        rotateHandle.frame = CGRect(x: bounds.midX - 11, y: -28 - 22, width: 22, height: 22)
+
+        if kind == .stickyNote {
+            // 影のパスを角丸に合わせる(perf)+ 文字が枠に収まるようフォントを自動調整
+            layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
+            fitStickyFont()
+        }
 
         if kind == .noteLink {
             linkCard.frame = bounds
@@ -595,7 +868,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// コンテンツ空間なので、スクリーン上で概ね一定(約16pt)になるようズームで補正する。
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         let margin = 16 / max(layerView?.zoom ?? 1, 0.01)
-        return bounds.insetBy(dx: -margin, dy: -margin).contains(point)
+        if bounds.insetBy(dx: -margin, dy: -margin).contains(point) { return true }
+        // 上へ突き出た回転ハンドル(表示中のみ)も当たり判定に含める
+        if !rotateHandle.isHidden, rotateHandle.frame.insetBy(dx: -margin, dy: -margin).contains(point) {
+            return true
+        }
+        return false
     }
 
     // MARK: - モデル反映
@@ -608,6 +886,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         let fontChanged = kind == .text && fontSize != item.fontSize
         contentFrame = item.frame
         fontSize = item.fontSize
+        rotation = item.rotation
         parentGroupID = item.parentGroupID
         if isUserLocked != item.isUserLocked {
             isUserLocked = item.isUserLocked
@@ -615,10 +894,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             configureLockState()
             refreshSelectionChrome()  // ロック中はリサイズハンドルを出さない(選択枠は残す)
         }
-        if kind == .text, !textView.isFirstResponder, textView.text != item.text {
+        if (kind == .text || kind == .stickyNote), !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
-        if kind == .text { updateTextAccessibility() }
+        if kind == .stickyNote {
+            backgroundColor = (item.stickyNotePayload?.color ?? .yellow).backgroundUIColor
+            textView.textColor = (item.stickyNotePayload?.color ?? .yellow).textUIColor
+            setNeedsLayout()  // フォント自動調整
+        }
+        if kind == .text || kind == .stickyNote { updateTextAccessibility() }
         // 編集中はビュー側が真値なので上書きしない(テキストと同様のガード)
         if kind == .todo, !todoListView.isEditing {
             todoListView.setItems(item.todoItems)
@@ -662,7 +946,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// コンテンツ空間へ直接配置する。スクロール/ズームへの追従はスクロールビューの合成が行う
     /// ため、オフセットやズームの計算は不要(= スクロール中の再配置コストがゼロ)。
     func applyPlacement() {
-        frame = contentFrame
+        // 回転対応のため frame ではなく bounds + center + transform で配置する。
+        // rotation==0 では transform=identity となり、frame は従来と完全一致する
+        // (既存のフレーム依存挙動・テストに影響しない)。
+        transform = .identity  // bounds/center を素の座標系で設定するため一旦解除
+        bounds = CGRect(origin: .zero, size: contentFrame.size)
+        center = CGPoint(x: contentFrame.midX, y: contentFrame.midY)
+        transform = rotation == 0 ? .identity : CGAffineTransform(rotationAngle: rotation)
         if kind == .text {
             textView.font = .systemFont(ofSize: fontSize)
         }
@@ -690,6 +980,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // 表は列/行の個別リサイズハンドルで調整するため、四隅の一括リサイズは出さない。
         resizeHandle.isHidden = !show || kind == .table
         if kind == .table { tableView.setResizeHandlesVisible(show) }
+        // 回転ハンドルは単一選択かつ非ロックで表示(コネクタは非対象だが枠付きビューにならない)
+        rotateHandle.isHidden = !show
     }
 
     /// 移動・削除から保護されているか(システム/ユーザーどちらのロックでも)
@@ -740,10 +1032,29 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// テキストを accessibility value として公開しなくなる(選択解除後に要素が value 検索で
     /// 見つからなくなる)。ここで identifier と value を明示して常時参照可能にする。
     private func updateTextAccessibility() {
-        guard kind == .text else { return }
+        guard kind == .text || kind == .stickyNote else { return }
         textView.isAccessibilityElement = true
-        textView.accessibilityIdentifier = "canvas-object-text"
+        textView.accessibilityIdentifier = kind == .stickyNote ? "canvas-object-sticky" : "canvas-object-text"
         textView.accessibilityValue = textView.text
+    }
+
+    /// 付箋: 文字が枠に収まる最大フォント(12〜40pt)へ自動調整する(要件: 自動フォントサイズ)。
+    private func fitStickyFont() {
+        guard kind == .stickyNote else { return }
+        let maxW = bounds.width - 20, maxH = bounds.height - 20
+        guard maxW > 0, maxH > 0 else { return }
+        let text = textView.text ?? ""
+        var size: CGFloat = 40
+        let minSize: CGFloat = 12
+        while size > minSize {
+            let bounding = (text as NSString).boundingRect(
+                with: CGSize(width: maxW, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: UIFont.systemFont(ofSize: size)], context: nil)
+            if bounding.height <= maxH { break }
+            size -= 2
+        }
+        if textView.font?.pointSize != size { textView.font = .systemFont(ofSize: size) }
     }
 
     // MARK: - テキスト編集
@@ -751,7 +1062,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     func beginTextEditing() {
         guard !isUserLocked else { return }  // ロック中は編集不可
         switch kind {
-        case .text:
+        case .text, .stickyNote:
             textView.isEditable = true
             textView.isUserInteractionEnabled = true
             textView.becomeFirstResponder()
@@ -763,7 +1074,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     private func endTextEditing() {
-        if kind == .text, textView.isFirstResponder {
+        if (kind == .text || kind == .stickyNote), textView.isFirstResponder {
             // 入力内容を resignFirstResponder より先に永続化する。
             // resign から textViewDidEndEditing までの間に選択変更由来の再描画で
             // apply(_:) が走ると、まだ空のモデル値で入力済みテキストを上書き消去して
@@ -778,6 +1089,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     func textViewDidChange(_ textView: UITextView) {
+        // 付箋はサイズ固定でフォントを自動調整する(高さは変えない)。
+        if kind == .stickyNote {
+            fitStickyFont()
+            updateTextAccessibility()
+            return
+        }
         // 入力に合わせて高さを自動拡張。テキストはコンテンツ空間のフォントサイズなので
         // sizeThatFits の結果はそのままコンテンツ空間の高さになる(ズーム換算は不要)
         let fitting = textView.sizeThatFits(
@@ -805,8 +1122,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         // 指タップはツールに関係なくオブジェクトを選択できる(hitTest が指タッチを通す)。
         guard let layerView else { return }
         if layerView.selectedID == objectID {
-            // 単体選択中の再タップ → テキスト/Todoを編集開始
-            if kind == .text || kind == .todo { beginTextEditing() }
+            // 単体選択中の再タップ → テキスト/Todo/付箋を編集開始
+            if kind == .text || kind == .todo || kind == .stickyNote { beginTextEditing() }
         } else {
             // グループ化済みならグループ全体、そうでなければ単体を選択
             layerView.selectTapped(objectID)
@@ -824,6 +1141,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         guard let layerView, kind == .shape else { return }
         if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
         layerView.onShapeEdit?(objectID)
+    }
+
+    /// 付箋のダブルタップ → 選択したうえで即座にテキスト入力へ入る。
+    @objc private func handleStickyEditDoubleTap() {
+        guard let layerView, kind == .stickyNote else { return }
+        if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
+        beginTextEditing()
     }
 
     /// 表のダブルタップ → 選択したうえで、タップしたセルのテキスト編集に入る。
@@ -856,6 +1180,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             contentFrame = result.frame
             layerView.showGuides(result.guides)
             applyPlacement()
+            layerView.refreshConnectorPositions()  // コネクタを追従
         case .ended, .cancelled, .failed:
             isInteracting = false
             layerView.showGuides([])
@@ -896,6 +1221,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             }
             contentFrame.size = CGSize(width: newWidth, height: newHeight)
             applyPlacement()
+            layerView.refreshConnectorPositions()  // コネクタを追従
         case .ended, .cancelled, .failed:
             isInteracting = false
             // リサイズ中に行の増減があると、todoListView.onHeightChanged は
@@ -903,6 +1229,27 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             // false にした直後に高さを再計算させ、取りこぼしを解消する。
             if kind == .todo { todoListView.reportHeight() }
             layerView.onFrameChanged?(objectID, contentFrame)
+        default:
+            break
+        }
+    }
+
+    /// 回転ハンドルのドラッグで、中心からタッチ点への角度に合わせてオブジェクトを回転する。
+    /// ハンドルの静止位置は上辺の上(中心の真上)なので、rotation = 角度 + π/2。
+    @objc private func handleRotatePan(_ gesture: UIPanGestureRecognizer) {
+        guard let layerView, layerView.selectedID == objectID else { return }
+        let center = CGPoint(x: contentFrame.midX, y: contentFrame.midY)
+        switch gesture.state {
+        case .began:
+            isInteracting = true
+        case .changed:
+            let angle = SelectionGeometry.angle(from: center, to: gesture.location(in: layerView))
+            rotation = angle + .pi / 2
+            applyPlacement()
+            layerView.refreshConnectorPositions()
+        case .ended, .cancelled, .failed:
+            isInteracting = false
+            layerView.onRotationChanged?(objectID, rotation)
         default:
             break
         }
@@ -948,6 +1295,12 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         } else if multi {
             actions.append(UIAction(title: "グループ化", image: UIImage(systemName: "square.on.square")) {
                 [weak self] _ in self?.layerView?.onGroupObjects?(ids)
+            })
+        }
+        // ちょうど2つ選択しているとき、コネクタ線で接続できる(接続導線が有効なノートのみ)。
+        if ids.count == 2, layerView.onConnectObjects != nil {
+            actions.append(UIAction(title: "コネクタで接続", image: UIImage(systemName: "point.topleft.down.to.point.bottomright.curvepath")) {
+                [weak self] _ in self?.layerView?.onConnectObjects?(ids)
             })
         }
         if !multi {
