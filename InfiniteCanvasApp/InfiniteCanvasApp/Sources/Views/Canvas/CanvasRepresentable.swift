@@ -666,6 +666,11 @@ struct CanvasRepresentable: UIViewRepresentable {
         /// 描画・オブジェクトの変化、ズーム、bounds 変化のたびに呼び直す(冪等)。
         func refreshInfiniteWorld(in container: CanvasContainerUIView) {
             guard parent.noteType == .infinite else { return }
+            // ピンチズーム中は contentSize/contentInset/原点リベースを一切触らない。
+            // スクロール制限の負の contentInset はズーム倍率に比例するため、ズーム中に毎フレーム
+            // 書き換えるとピンチのアンカーが原点方向へずれ、オブジェクトが右下/左上へドリフトする。
+            // ズーム確定後(scrollViewDidEndZooming)にまとめて適用する。
+            guard !container.canvasView.isZooming else { return }
             if let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: parent.infiniteContentUnion) {
                 rebaseOrigin(by: delta, in: container)
             }
@@ -821,13 +826,19 @@ struct CanvasRepresentable: UIViewRepresentable {
                let inset = parent.pagedContentInset(for: canvas) {
                 canvas.contentInset = inset
             }
-            // 無限キャンバスはズームでワールドサイズ・スクロール制限を計算し直す
-            if parent.noteType == .infinite, let container {
-                refreshInfiniteWorld(in: container)
-            }
+            // 無限キャンバスのワールドサイズ/スクロール制限の再計算はズーム中は行わない
+            // (refreshInfiniteWorld は isZooming 中は no-op)。確定後に scrollViewDidEndZooming で適用する。
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
             )
+        }
+
+        /// ピンチズーム確定後に、無限キャンバスのワールドサイズ/スクロール制限をまとめて適用する
+        /// (ズーム中に触るとアンカーがずれるため、ここで一度だけ)。
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            guard parent.noteType == .infinite, let container else { return }
+            refreshInfiniteWorld(in: container)
+            scrollView.contentOffset = clampedInfiniteOffset(scrollView.contentOffset, for: scrollView)
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
