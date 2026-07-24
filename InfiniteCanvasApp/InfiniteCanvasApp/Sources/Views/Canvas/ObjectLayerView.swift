@@ -478,7 +478,9 @@ final class ObjectLayerUIView: UIView {
         bringSubviewToFront(view)
         layoutIfNeeded()          // 編集開始前にレイアウトを確定させる
         select(item.id)
-        view.beginTextEditing()   // 配置と同時に編集開始(実機ではソフトキーボードも表示)
+        // 図形は配置と同時に編集開始しない(テキストはダブルタップで入力)。
+        // テキスト/Todo は配置と同時に編集開始(実機ではソフトキーボードも表示)。
+        if item.kind != .shape { view.beginTextEditing() }
     }
 
     /// 選択モード中、オブジェクトのない場所のタップで選択解除(コンテナから呼ばれる)
@@ -615,6 +617,17 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         case .shape:
             shapeView.payload = item.shapePayload
             addSubview(shapeView)
+            // 図形の中にテキストを書ける(Freeform 同等)。図形の上に中央寄せの textView を重ねる。
+            textView.isScrollEnabled = false
+            textView.backgroundColor = .clear
+            textView.textColor = .label
+            textView.textAlignment = .center
+            textView.isEditable = false
+            textView.isUserInteractionEnabled = false  // 編集開始まで自分がタッチを受ける
+            textView.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+            textView.delegate = self
+            addSubview(textView)
+            updateTextAccessibility()
         case .table:
             tableView.onCellChanged = { [weak self] payload in
                 guard let self else { return }
@@ -728,7 +741,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
 
         // 図形はダブルタップで編集ポップオーバー(線色/塗り/太さ)を開く。
         if kind == .shape {
-            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleShapeEditDoubleTap))
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleShapeTextDoubleTap))
             doubleTap.numberOfTapsRequired = 2
             doubleTap.allowedTouchTypes = fingerOnly
             addGestureRecognizer(doubleTap)
@@ -834,6 +847,15 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
             fitStickyFont()
         }
+        if kind == .shape {
+            // 図形内テキストを枠に収まるフォントへ自動調整し、縦中央へ寄せる
+            fitStickyFont()
+            let fitting = textView.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude))
+            let topInset = max(8, (bounds.height - fitting.height) / 2)
+            if abs(textView.textContainerInset.top - topInset) > 0.5 {
+                textView.textContainerInset = UIEdgeInsets(top: topInset, left: 8, bottom: 8, right: 8)
+            }
+        }
 
         if kind == .noteLink {
             linkCard.frame = bounds
@@ -894,7 +916,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             configureLockState()
             refreshSelectionChrome()  // ロック中はリサイズハンドルを出さない(選択枠は残す)
         }
-        if (kind == .text || kind == .stickyNote), !textView.isFirstResponder, textView.text != item.text {
+        if (kind == .text || kind == .stickyNote || kind == .shape), !textView.isFirstResponder, textView.text != item.text {
             textView.text = item.text
         }
         if kind == .stickyNote {
@@ -902,7 +924,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
             textView.textColor = (item.stickyNotePayload?.color ?? .yellow).textUIColor
             setNeedsLayout()  // フォント自動調整
         }
-        if kind == .text || kind == .stickyNote { updateTextAccessibility() }
+        if kind == .text || kind == .stickyNote || kind == .shape { updateTextAccessibility() }
         // 編集中はビュー側が真値なので上書きしない(テキストと同様のガード)
         if kind == .todo, !todoListView.isEditing {
             todoListView.setItems(item.todoItems)
@@ -910,6 +932,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if kind == .shape {
             shapeView.payload = item.shapePayload
             shapeView.setNeedsDisplay()
+            setNeedsLayout()  // 図形内テキストのフォント自動調整
         }
         if kind == .table {
             tableView.payload = item.tablePayload
@@ -1032,15 +1055,19 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     /// テキストを accessibility value として公開しなくなる(選択解除後に要素が value 検索で
     /// 見つからなくなる)。ここで identifier と value を明示して常時参照可能にする。
     private func updateTextAccessibility() {
-        guard kind == .text || kind == .stickyNote else { return }
+        guard kind == .text || kind == .stickyNote || kind == .shape else { return }
         textView.isAccessibilityElement = true
-        textView.accessibilityIdentifier = kind == .stickyNote ? "canvas-object-sticky" : "canvas-object-text"
+        switch kind {
+        case .stickyNote: textView.accessibilityIdentifier = "canvas-object-sticky"
+        case .shape: textView.accessibilityIdentifier = "canvas-object-shape-text"
+        default: textView.accessibilityIdentifier = "canvas-object-text"
+        }
         textView.accessibilityValue = textView.text
     }
 
-    /// 付箋: 文字が枠に収まる最大フォント(12〜40pt)へ自動調整する(要件: 自動フォントサイズ)。
+    /// 付箋・図形: 文字が枠に収まる最大フォント(12〜40pt)へ自動調整する(要件: 自動フォントサイズ)。
     private func fitStickyFont() {
-        guard kind == .stickyNote else { return }
+        guard kind == .stickyNote || kind == .shape else { return }
         let maxW = bounds.width - 20, maxH = bounds.height - 20
         guard maxW > 0, maxH > 0 else { return }
         let text = textView.text ?? ""
@@ -1062,7 +1089,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     func beginTextEditing() {
         guard !isUserLocked else { return }  // ロック中は編集不可
         switch kind {
-        case .text, .stickyNote:
+        case .text, .stickyNote, .shape:
             textView.isEditable = true
             textView.isUserInteractionEnabled = true
             textView.becomeFirstResponder()
@@ -1074,7 +1101,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     private func endTextEditing() {
-        if (kind == .text || kind == .stickyNote), textView.isFirstResponder {
+        if (kind == .text || kind == .stickyNote || kind == .shape), textView.isFirstResponder {
             // 入力内容を resignFirstResponder より先に永続化する。
             // resign から textViewDidEndEditing までの間に選択変更由来の再描画で
             // apply(_:) が走ると、まだ空のモデル値で入力済みテキストを上書き消去して
@@ -1089,8 +1116,8 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
     }
 
     func textViewDidChange(_ textView: UITextView) {
-        // 付箋はサイズ固定でフォントを自動調整する(高さは変えない)。
-        if kind == .stickyNote {
+        // 付箋・図形はサイズ固定でフォントを自動調整する(高さは変えない)。
+        if kind == .stickyNote || kind == .shape {
             fitStickyFont()
             updateTextAccessibility()
             return
@@ -1123,7 +1150,7 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         guard let layerView else { return }
         if layerView.selectedID == objectID {
             // 単体選択中の再タップ → テキスト/Todo/付箋を編集開始
-            if kind == .text || kind == .todo || kind == .stickyNote { beginTextEditing() }
+            if kind == .text || kind == .todo || kind == .stickyNote || kind == .shape { beginTextEditing() }
         } else {
             // グループ化済みならグループ全体、そうでなければ単体を選択
             layerView.selectTapped(objectID)
@@ -1136,11 +1163,11 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         layerView.onNoteLinkActivated?(objectID)
     }
 
-    /// 図形のダブルタップ → 選択したうえで編集ポップオーバーを要求する
-    @objc private func handleShapeEditDoubleTap() {
+    /// 図形のダブルタップ → 選択したうえで図形内テキストの編集に入る(色/塗り/太さは長押しメニューへ)。
+    @objc private func handleShapeTextDoubleTap() {
         guard let layerView, kind == .shape else { return }
         if layerView.selectedID != objectID { layerView.selectTapped(objectID) }
-        layerView.onShapeEdit?(objectID)
+        beginTextEditing()
     }
 
     /// 付箋のダブルタップ → 選択したうえで即座にテキスト入力へ入る。
@@ -1301,6 +1328,13 @@ final class CanvasObjectUIView: UIView, UITextViewDelegate, UIEditMenuInteractio
         if ids.count == 2, layerView.onConnectObjects != nil {
             actions.append(UIAction(title: "コネクタで接続", image: UIImage(systemName: "point.topleft.down.to.point.bottomright.curvepath")) {
                 [weak self] _ in self?.layerView?.onConnectObjects?(ids)
+            })
+        }
+        // 図形は単体長押しで色/塗り/太さの編集(ダブルタップはテキスト入力に使うため導線を分離)
+        if !multi, kind == .shape {
+            actions.append(UIAction(title: "図形を編集", image: UIImage(systemName: "paintpalette")) {
+                [weak self] _ in guard let self else { return }
+                self.layerView?.onShapeEdit?(self.objectID)
             })
         }
         if !multi {

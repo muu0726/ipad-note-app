@@ -8,28 +8,51 @@ final class ShapeObjectUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// 四角を配置し、ダブルタップで編集ポップオーバー(太さスライダー)が開くこと。
+    /// 四角を配置し、ダブルタップで図形の中にテキストを書ける(Freeform 同等)こと。
     @MainActor
-    func testPlaceRectangleAndOpenEditor() throws {
+    func testShapeTextEditing() throws {
         let app = launchApp()
         try openAnyNote(app)
         let window = app.windows.firstMatch
 
-        // ＋メニュー → 図形 → 四角
-        openInsertMenu(app)
-        tapByIdentifier(app, "toolbar-insert-shape")
-        tapByIdentifier(app, "toolbar-shape-rectangle")
+        placeRectangle(app)
+        // 配置直後の選択を解除
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.2)).tap()
 
-        // キャンバス中央へ配置
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        attachScreenshot(app, name: "1-rectangle-placed")
-
-        // 配置した図形をダブルタップ → 編集ポップオーバー(太さスライダー)
+        // 図形をダブルタップ → テキスト編集(キーボード)
         window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).doubleTap()
-        let widthSlider = app.sliders["shape-line-width"]
-        XCTAssertTrue(widthSlider.waitForExistence(timeout: 5),
-                      "図形ダブルタップで編集ポップオーバーが開かない")
-        attachScreenshot(app, name: "2-shape-editor-open")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5),
+                      "図形ダブルタップでテキスト編集が始まらない")
+        let text = "5656"
+        app.typeText(text)
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.2)).tap()
+        _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 5)
+
+        let shapeText = app.textViews.matching(identifier: "canvas-object-shape-text").firstMatch
+        XCTAssertTrue(shapeText.waitForExistence(timeout: 5), "図形内テキストの要素が見つからない")
+        XCTAssertTrue((shapeText.value as? String)?.contains(text) == true,
+                      "図形内テキストが反映されない: \(String(describing: shapeText.value))")
+        attachScreenshot(app, name: "2-shape-with-text")
+    }
+
+    /// 図形の色/塗り/太さ編集は長押しメニュー「図形を編集」から開くこと。
+    @MainActor
+    func testShapeStyleEditorViaLongPress() throws {
+        let app = launchApp()
+        try openAnyNote(app)
+        let window = app.windows.firstMatch
+
+        placeRectangle(app)
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.2)).tap()
+
+        // 長押し → メニュー「図形を編集」 → 太さスライダー
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.1)
+        var edit = app.menuItems["図形を編集"]
+        if !edit.waitForExistence(timeout: 3) { edit = app.buttons["図形を編集"] }
+        XCTAssertTrue(edit.waitForExistence(timeout: 3), "長押しメニューに『図形を編集』が無い")
+        edit.tap()
+        XCTAssertTrue(app.sliders["shape-line-width"].waitForExistence(timeout: 5),
+                      "『図形を編集』で編集ポップオーバーが開かない")
     }
 
     /// 6種すべてを順に配置してもクラッシュせず、ツールバーが操作可能なままであること。
@@ -59,6 +82,15 @@ final class ShapeObjectUITests: XCTestCase {
     }
 
     // MARK: - ヘルパー
+
+    /// ＋メニュー → 図形 → 四角 をキャンバス中央へ配置する。
+    @MainActor
+    private func placeRectangle(_ app: XCUIApplication) {
+        openInsertMenu(app)
+        tapByIdentifier(app, "toolbar-insert-shape")
+        tapByIdentifier(app, "toolbar-shape-rectangle")
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
 
     @MainActor
     private func openInsertMenu(_ app: XCUIApplication) {
