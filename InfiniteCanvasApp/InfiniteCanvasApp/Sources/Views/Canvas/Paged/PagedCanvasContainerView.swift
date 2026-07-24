@@ -153,6 +153,8 @@ final class PagedCanvasContainerUIView: UIView, UIScrollViewDelegate, UIGestureR
         scrollView.delaysContentTouches = false  // 長押し等をオブジェクトへ即時に渡す
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
+        // Goodnotes 同様「紙の安心感」: 指ドラッグは1軸に固定し、斜めドリフトを排除する。
+        scrollView.isDirectionalLockEnabled = true
         // ページスナップは isPagingEnabled ではなく scrollViewWillEndDragging のカスタム実装
         // (ズーム倍率によりページ実幅と画面幅が一致しないため)
         scrollView.isPagingEnabled = false

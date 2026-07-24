@@ -41,7 +41,7 @@ enum LibraryService {
         note.noteType = noteType.rawValue
         note.backgroundStyle = backgroundStyle.rawValue
         note.pageCount = 1  // 通常ノートは1ページから開始
-        note.isHorizontalScroll = (noteType == .paged)  // 通常ノートは横スクロール固定
+        note.isHorizontalScroll = false  // 通常ノートは Goodnotes 同様「縦連続スクロール」を既定に(横は設定で選択可)
         save(context)
         return note
     }

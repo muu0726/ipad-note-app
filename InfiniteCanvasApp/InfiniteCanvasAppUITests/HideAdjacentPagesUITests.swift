@@ -14,6 +14,7 @@ final class HideAdjacentPagesUITests: XCTestCase {
     func testToggleShowsMaskAndPersists() throws {
         let app = launchApp()
         try createPagedNote(app)
+        switchToHorizontal(app)  // 隣ページ遮蔽は横めくりの機能。既定は縦連続なので横へ切り替える
         try addOnePageByOverscroll(app)  // 隣ページを1枚用意(この後アクティブは末尾ページ)
 
         // どちらの端に立つかはアクティブページ依存のため、左右いずれかのマスク出現を見る
@@ -72,6 +73,17 @@ final class HideAdjacentPagesUITests: XCTestCase {
         app.buttons["作成"].tap()
         XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
                       "通常ノートが開かない(paged 判定失敗)")
+    }
+
+    /// 既定は縦連続。隣ページ遮蔽(左右マスク)は横めくりの機能なので横へ切り替える。
+    @MainActor
+    private func switchToHorizontal(_ app: XCUIApplication) {
+        app.buttons["paged-settings-button"].tap()
+        let horizontal = app.segmentedControls["picker-scroll-direction"].buttons["横めくり"]
+        let target = horizontal.exists ? horizontal : app.buttons["横めくり"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5), "スクロール方向設定に『横めくり』が無い")
+        target.tap()
+        dismissPopover(app)
     }
 
     /// 末尾を超えて横に引っ張り、ページを1枚自動追加する(PagedNoteUITests と同手)。

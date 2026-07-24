@@ -1,9 +1,9 @@
 import XCTest
 
-/// 通常ノート(paged)のスクロール方向切替(横めくり ⇄ 縦連続スクロール)を検証する。
-/// - 既定は横めくり。設定の「スクロール方向」で縦連続へ切り替えられること。
+/// 通常ノート(paged)のスクロール方向切替(縦連続スクロール ⇄ 横めくり)を検証する。
+/// - 既定は Goodnotes 同様「縦連続スクロール」。設定の「スクロール方向」で横めくりへ切り替えられること。
 /// - 縦モードでは下端を超えて上へ引っ張るとページが自動追加されること(縦オーバースクロール)。
-/// - 設定がノート再オープン後も保持されること(強制横化されない)。
+/// - 設定がノート再オープン後も保持されること。
 /// レイアウト幾何は PagedLayoutCalculatorTests(ユニット)で担保。ここでは配線と永続化を見る。
 final class PagedScrollDirectionUITests: XCTestCase {
 
@@ -12,16 +12,13 @@ final class PagedScrollDirectionUITests: XCTestCase {
     }
 
     @MainActor
-    func testSwitchToVerticalEnablesVerticalOverscrollAndPersists() throws {
+    func testDefaultIsVerticalAndDirectionSwitchPersists() throws {
         let app = launchApp()
         try createPagedNote(app)
 
-        // 既定は横めくり = セグメントは「横めくり」が選択されている
+        // 既定は縦連続スクロール(Goodnotes 同等)= セグメントは「縦スクロール」が選択されている
         openPagedSettings(app)
-        XCTAssertTrue(segment(app, "横めくり").isSelected, "既定が横めくりではない")
-
-        // 縦連続スクロールへ切替
-        segment(app, "縦スクロール").tap()
+        XCTAssertTrue(segment(app, "縦スクロール").isSelected, "既定が縦スクロールではない")
         dismissPopover(app)
 
         // 縦モード: 下端を超えて上へ引っ張るとページが1枚追加される(縦オーバースクロール)
@@ -29,12 +26,15 @@ final class PagedScrollDirectionUITests: XCTestCase {
                       "縦スクロールで下端オーバースクロールしてもページが追加されない")
         attachScreenshot(app, name: "1-vertical-overscroll-added-page")
 
-        // 永続化: 閉じて再オープン → 縦のまま(強制横化されない)
+        // 横めくりへ切替 → 閉じて再オープン → 横のまま(永続化)
+        openPagedSettings(app)
+        segment(app, "横めくり").tap()
+        dismissPopover(app)
         app.buttons["canvas-to-library"].tap()
         try reopenFirstNote(app)
         openPagedSettings(app)
-        XCTAssertTrue(segment(app, "縦スクロール").isSelected,
-                      "スクロール方向が永続化されていない(再オープンで横へ戻った)")
+        XCTAssertTrue(segment(app, "横めくり").isSelected,
+                      "スクロール方向が永続化されていない(再オープンで縦へ戻った)")
     }
 
     // MARK: - ヘルパー

@@ -30,6 +30,7 @@ final class PagedDrawingBoundsUITests: XCTestCase {
         app.buttons["作成"].tap()
         XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
                       "通常ノートが開かない(paged 判定失敗)")
+        switchToHorizontal(app)  // 既定は縦連続。用紙(左)とグレー余白(右)の横レイアウトで用紙外判定を検証する
 
         let undo = app.buttons["toolbar-undo"]
         XCTAssertTrue(undo.waitForExistence(timeout: 5), "ツールバーが出ない")
@@ -64,6 +65,18 @@ final class PagedDrawingBoundsUITests: XCTestCase {
     }
 
     // MARK: - ヘルパー
+
+    /// 既定は縦連続スクロール。横レイアウト(用紙左・グレー右)前提のため設定で横めくりへ切り替える。
+    @MainActor
+    private func switchToHorizontal(_ app: XCUIApplication) {
+        app.buttons["paged-settings-button"].tap()
+        let horizontal = app.segmentedControls["picker-scroll-direction"].buttons["横めくり"]
+        let target = horizontal.exists ? horizontal : app.buttons["横めくり"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5), "スクロール方向設定に『横めくり』が無い")
+        target.tap()
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        _ = app.segmentedControls["picker-scroll-direction"].waitForNonExistence(timeout: 3)
+    }
 
     @MainActor
     private func drag(_ element: XCUIElement, from: (CGFloat, CGFloat), to: (CGFloat, CGFloat)) {

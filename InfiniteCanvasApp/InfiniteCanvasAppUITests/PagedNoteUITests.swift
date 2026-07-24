@@ -47,6 +47,7 @@ final class PagedNoteUITests: XCTestCase {
 
         XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
                       "通常ノートが開かない")
+        switchToHorizontal(app)  // 既定は縦連続。横めくりの末尾オーバースクロールを検証するため横へ
         // 1ページ目のみ = 削除ボタンはまだ無い
         XCTAssertFalse(app.buttons["canvas-delete-page"].exists, "最初から複数ページになっている")
 
@@ -70,6 +71,7 @@ final class PagedNoteUITests: XCTestCase {
         createPagedNote(app)
         XCTAssertTrue(app.buttons["paged-settings-button"].waitForExistence(timeout: 5),
                       "通常ノートが開かない")
+        switchToHorizontal(app)  // 横めくりの末尾オーバースクロール + 削除後クランプ挙動を検証
 
         // 2ページ目をオーバースクロールで追加(そのページへ自動スクロール)
         let canvas = app.windows.firstMatch
@@ -152,6 +154,20 @@ final class PagedNoteUITests: XCTestCase {
     @MainActor
     private func segment(_ app: XCUIApplication, id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@", id)).firstMatch
+    }
+
+    /// 既定は縦連続スクロール。横めくり(ページめくり)前提のテストのため、設定で横へ切り替える。
+    @MainActor
+    private func switchToHorizontal(_ app: XCUIApplication) {
+        app.buttons["paged-settings-button"].tap()
+        let horizontal = app.segmentedControls["picker-scroll-direction"].buttons["横めくり"]
+        let byLabel = app.buttons["横めくり"]
+        let target = horizontal.exists ? horizontal : byLabel
+        XCTAssertTrue(target.waitForExistence(timeout: 5), "スクロール方向設定に『横めくり』が無い")
+        target.tap()
+        // ポップオーバーを閉じる
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        _ = app.segmentedControls["picker-scroll-direction"].waitForNonExistence(timeout: 3)
     }
 
     @MainActor
