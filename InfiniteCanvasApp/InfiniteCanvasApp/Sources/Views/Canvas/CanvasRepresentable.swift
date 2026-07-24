@@ -391,9 +391,10 @@ struct CanvasRepresentable: UIViewRepresentable {
         return container
     }
 
-    /// 通常ノートの机(背景)色。無限は用紙色
+    /// 通常ノートの机(背景)色。無限は Freeform 風の板色(白紙は淡いグレー、黒紙は黒)。
     private var containerBackgroundColor: UIColor {
-        noteType == .paged ? .systemGray5 : pageColor.backgroundUIColor
+        if noteType == .paged { return .systemGray5 }
+        return pageColor == .white ? UIColor(white: 0.949, alpha: 1) : pageColor.backgroundUIColor
     }
 
     /// 通常ノートの最小ズーム = 「1ユニット(1ページ or 2ページ見開き)」全体が画面に綺麗に
@@ -1495,13 +1496,22 @@ final class BackgroundPatternUIView: UIView {
         if scaleChanged || spacingChanged { rebuild() }
     }
 
+    /// 無限キャンバス(Freeform)の板の色。白紙は Freeform 風の淡いグレー板、黒紙はそのまま黒。
+    /// (Freeform のボードは純白ではなく、うっすらグレーがかった中立色)
+    private var infiniteBoardColor: UIColor {
+        switch pageColor {
+        case .white: UIColor(white: 0.949, alpha: 1)  // ≈ systemGray6 相当の淡いグレー
+        case .black: pageColor.backgroundUIColor
+        }
+    }
+
     private func rebuild() {
         switch noteType {
         case .infinite:
             pageViews.forEach { $0.removeFromSuperview() }
             pageViews.removeAll()
             backgroundColor = (style == .blank)
-                ? pageColor.backgroundUIColor
+                ? infiniteBoardColor
                 : UIColor(patternImage: makeTile())
         case .paged:
             backgroundColor = .systemGray5  // 机(背景)のグレー
@@ -1570,9 +1580,11 @@ final class BackgroundPatternUIView: UIView {
         let renderer = UIGraphicsImageRenderer(
             size: CGSize(width: spacing, height: spacing), format: format
         )
+        // 無限キャンバスは Freeform 風の淡いグレー板、paged は用紙色(白/黒)を下地にする。
+        let boardColor = (noteType == .infinite) ? infiniteBoardColor : pageColor.backgroundUIColor
         return renderer.image { ctx in
             let c = ctx.cgContext
-            pageColor.backgroundUIColor.setFill()
+            boardColor.setFill()
             c.fill(CGRect(x: 0, y: 0, width: spacing, height: spacing))
 
             switch style {
