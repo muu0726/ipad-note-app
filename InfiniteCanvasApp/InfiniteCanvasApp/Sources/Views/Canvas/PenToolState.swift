@@ -55,11 +55,11 @@ enum CanvasPageColor: String, CaseIterable {
         }
     }
 
-    /// 方眼・ドットの色
+    /// 方眼・ドットの色。Freeform / Goodnotes 同様、用紙上で主張しすぎない淡いグレーにする。
     var patternUIColor: UIColor {
         switch self {
-        case .white: UIColor.black.withAlphaComponent(0.45)
-        case .black: UIColor.white.withAlphaComponent(0.55)
+        case .white: UIColor.black.withAlphaComponent(0.20)
+        case .black: UIColor.white.withAlphaComponent(0.30)
         }
     }
 

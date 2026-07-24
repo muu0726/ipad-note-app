@@ -1525,16 +1525,30 @@ final class BackgroundPatternUIView: UIView {
         for index in 0..<max(1, pagedLayout.pageCount) {
             let page = UIView(frame: pagedLayout.pageRect(index))
             page.backgroundColor = pageBackground
-            // 用紙らしい影と薄い境界線
+            // 用紙らしい影とはっきりした境界線(ページの縁が分かるように)
             page.layer.shadowColor = UIColor.black.cgColor
             page.layer.shadowOpacity = 0.18
             page.layer.shadowRadius = 6
             page.layer.shadowOffset = shadowOffset
             page.layer.shadowPath = UIBezierPath(rect: page.bounds).cgPath
-            page.layer.borderColor = UIColor.black.withAlphaComponent(0.08).cgColor
-            page.layer.borderWidth = 0.5
+            page.layer.borderColor = UIColor.black.withAlphaComponent(0.14).cgColor
+            page.layer.borderWidth = 1
             addSubview(page)
             pageViews.append(page)
+        }
+
+        // 横スクロールの見開き(2枚密着)は、ページ間の綴じ目(境界)を分かりやすく仕切る。
+        if pagedLayout.isTwoPageLayout, pagedLayout.scrollsHorizontally {
+            let w = PageMetrics.width, h = PageMetrics.height, gap = PageMetrics.gap
+            let unitCount = (max(1, pagedLayout.pageCount) + 1) / 2
+            for unit in 0..<unitCount {
+                let seamX = CGFloat(unit) * (2 * w + gap) + w
+                let divider = UIView(frame: CGRect(x: seamX - 1, y: 0, width: 2, height: h))
+                divider.backgroundColor = UIColor.black.withAlphaComponent(0.22)
+                divider.isUserInteractionEnabled = false
+                addSubview(divider)
+                pageViews.append(divider)
+            }
         }
     }
 
@@ -1546,8 +1560,9 @@ final class BackgroundPatternUIView: UIView {
         let base = Self.spacing  // = PageMetrics.width / 20 (=40)
         let spacing = (noteType == .infinite) ? Self.infiniteSpacing(forZoom: currentZoom, base: base) : base
         // 無限は間隔に比例させて画面上のドット/線を一定に保つ。paged は用紙固定サイズ。
-        let dotSize: CGFloat = (noteType == .infinite) ? spacing * 0.085 : 3.0
-        let lineWidth: CGFloat = (noteType == .infinite) ? spacing * 0.02 : 0.5
+        // Freeform のドットは小さめ・控えめ(画面上 ≈2.3px)。
+        let dotSize: CGFloat = (noteType == .infinite) ? spacing * 0.065 : 2.6
+        let lineWidth: CGFloat = (noteType == .infinite) ? spacing * 0.018 : 0.5
 
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = tileScale
