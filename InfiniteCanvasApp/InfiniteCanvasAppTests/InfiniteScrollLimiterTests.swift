@@ -109,43 +109,14 @@ struct InfiniteScrollLimiterTests {
 
 // MARK: - 背景タイルの間隔(ズーム非連動・Freeform 準拠)
 
-@Suite("BackgroundPattern タイル間隔(画面上一定・Freeform 準拠)")
+@Suite("BackgroundPattern タイル間隔(世界固定・Freeform 準拠)")
 struct BackgroundPatternTileSpacingTests {
 
-    /// 画面上の間隔 = コンテンツ間隔 × zoom。どのズームでも target(36)の √2 倍以内に収まる
-    /// = 肥大化しない。
-    @Test("画面上の間隔はどのズームでも一定域に収まる")
-    func screenSpacingStaysBounded() {
-        let base: CGFloat = 40, target: CGFloat = 36
-        for zoom in [CGFloat(0.1), 0.25, 0.5, 1.0, 2.0, 3.0, 5.0] {
-            let content = BackgroundPatternUIView.infiniteSpacing(forZoom: zoom, base: base, targetScreen: target)
-            let screen = content * zoom
-            // base×2^k 丸めのため、target の [1/√2, √2] 倍の帯に入る
-            #expect(screen >= target / 1.4143 - 0.001)
-            #expect(screen <= target * 1.4143 + 0.001)
-        }
-    }
-
-    @Test("間隔は base×2^k の値を取る(段階的で焼き直しが安定)")
-    func spacingIsPowerOfTwoMultiple() {
-        let base: CGFloat = 40
-        for zoom in [CGFloat(0.3), 1.0, 2.5, 4.0] {
-            let s = BackgroundPatternUIView.infiniteSpacing(forZoom: zoom, base: base)
-            let ratio = s / base
-            let log2r = (log2(ratio)).rounded()
-            #expect(abs(base * pow(2, log2r) - s) < 0.001)
-        }
-    }
-
-    @Test("100%(zoom=1)では基本間隔 40 になる")
-    func spacingAtUnityIsBase() {
-        #expect(BackgroundPatternUIView.infiniteSpacing(forZoom: 1.0, base: 40, targetScreen: 36) == 40)
-    }
-
-    @Test("ズームインしてもコンテンツ間隔は肥大化せず縮む(細分化)")
-    func zoomingInSubdivides() {
-        let s1 = BackgroundPatternUIView.infiniteSpacing(forZoom: 1.0)
-        let s5 = BackgroundPatternUIView.infiniteSpacing(forZoom: 5.0)
-        #expect(s5 < s1)  // 拡大時はコンテンツ間隔を細かくする
+    /// 無限キャンバスのドット間隔はコンテンツ(世界)空間で固定 = ズームに依存しない。
+    /// ズームで拡縮されるため、拡大すると画面内のドット数は減り、縮小すると増える。
+    @Test("間隔は固定(base)でズームに依存しない")
+    func spacingIsFixed() {
+        #expect(BackgroundPatternUIView.infiniteSpacing() == 40)
+        #expect(BackgroundPatternUIView.infiniteSpacing(base: 80) == 80)
     }
 }

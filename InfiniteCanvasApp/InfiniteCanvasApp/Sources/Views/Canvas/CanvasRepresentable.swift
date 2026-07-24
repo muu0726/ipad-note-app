@@ -1447,16 +1447,10 @@ final class BackgroundPatternUIView: UIView {
     /// paged 用のページビュー(1枚 = 1ページ)
     private var pageViews: [UIView] = []
 
-    /// 無限キャンバス: 画面上のドット/格子間隔がほぼ一定(≈ targetScreen px)に見えるよう、
-    /// コンテンツ空間のタイル間隔を `base × 2^k` から選ぶ。パターンはズーム合成で拡縮されるため、
-    /// ズームインするほどコンテンツ間隔を細かくして肥大化を防ぎ、Freeform 風に細かく再分割する。
-    /// (画面間隔 = 間隔 × zoom ≈ targetScreen)。純ロジック(ユニットテスト対象)。
-    static func infiniteSpacing(forZoom zoom: CGFloat, base: CGFloat = spacing, targetScreen: CGFloat = 36) -> CGFloat {
-        let z = max(zoom, 0.0001)
-        let k = (log2(targetScreen / z / base)).rounded()
-        let step = base * pow(2, k)
-        return min(max(step, base / 16), base * 64)
-    }
+    /// 無限キャンバスのドット間隔はコンテンツ(世界)空間で **固定**(base=40pt)。
+    /// パターンはズーム合成で拡縮されるため、拡大すると画面内のドット数は減り(1つ1つは大きくなる)、
+    /// 縮小すると増える = 背景を世界に固定する Freeform 同等の挙動。純ロジック(テスト対象)。
+    static func infiniteSpacing(base: CGFloat = spacing) -> CGFloat { base }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1486,14 +1480,12 @@ final class BackgroundPatternUIView: UIView {
     /// タイル間隔はコンテンツ空間で固定(Freeform 準拠)。画面上の見かけの拡縮は
     /// スクロールビューのズーム合成が担うため、ここでは間隔を動かさない。
     func applyZoom(_ zoom: CGFloat) {
-        // 無限キャンバスは「画面上の間隔一定」のため、コンテンツ間隔の段(base×2^k)が変わったら焼き直す。
-        let spacingChanged = noteType == .infinite
-            && Self.infiniteSpacing(forZoom: zoom) != Self.infiniteSpacing(forZoom: currentZoom)
+        // 無限キャンバスのドット間隔は固定(世界に固定)。ズームでは間隔は変えず、
+        // 拡大時に線がボケないようレンダリング解像度(tileScale)だけ上げて焼き直す。
         currentZoom = zoom
         let target = min(max(UIScreen.main.scale * zoom, UIScreen.main.scale), 12)
         let scaleChanged = abs(target - tileScale) > 0.5
-        if scaleChanged { tileScale = target }
-        if scaleChanged || spacingChanged { rebuild() }
+        if scaleChanged { tileScale = target; rebuild() }
     }
 
     /// 無限キャンバス(Freeform)の板の色。白紙は Freeform 風の淡いグレー板、黒紙はそのまま黒。
@@ -1567,12 +1559,11 @@ final class BackgroundPatternUIView: UIView {
     /// ほぼ一定になるようコンテンツ間隔を選び、ドット径・線幅も間隔に比例させて画面上一定に保つ
     /// (ズームインで肥大化しない = Freeform 準拠)。
     private func makeTile() -> UIImage {
-        let base = Self.spacing  // = PageMetrics.width / 20 (=40)
-        let spacing = (noteType == .infinite) ? Self.infiniteSpacing(forZoom: currentZoom, base: base) : base
-        // 無限は間隔に比例させて画面上のドット/線を一定に保つ。paged は用紙固定サイズ。
-        // Freeform のドットは小さめ・控えめ(画面上 ≈2.3px)。
-        let dotSize: CGFloat = (noteType == .infinite) ? spacing * 0.065 : 2.6
-        let lineWidth: CGFloat = (noteType == .infinite) ? spacing * 0.018 : 0.5
+        // 無限・paged とも間隔は固定 40pt(コンテンツ空間)。ズームで拡縮される。
+        let spacing = Self.spacing  // = 40
+        // Freeform 風の小さく控えめなドット/細い罫線(固定サイズ)。
+        let dotSize: CGFloat = 2.6
+        let lineWidth: CGFloat = 0.5
 
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = tileScale
