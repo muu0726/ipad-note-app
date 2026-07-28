@@ -497,7 +497,9 @@ final class ObjectLayerUIView: UIView {
         return SnapEngine.snap(
             moving: frame,
             others: others,
-            snapToGrid: backgroundStyle != .blank,
+            // Freeform 準拠: 背景グリッドへの磁石吸着はせず、他オブジェクトの端・中心への
+            // 整列ガイド吸着のみ行う(ドット/方眼表示中でもグリッドには吸着しない)。
+            snapToGrid: false,
             threshold: 8 / zoom  // スクリーン上で常に約8ptの吸着距離
         )
     }

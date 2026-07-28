@@ -212,12 +212,15 @@ struct CanvasRepresentable: UIViewRepresentable {
         // ページスナップは isPagingEnabled ではなく scrollViewWillEndDragging で
         // カスタム実装する(isPagingEnabled は bounds.width 単位でスナップするが、
         // 通常ノートはズーム倍率によりページ実幅と画面幅が一致しないため)。
+        // スクロール/ズームは外側 scrollView が担う(ミラー方式)。バウンス・ズーム範囲は
+        // すべて scrollView に設定する。インク面(canvasView)は自身のズームを持たず、
+        // updateInkWindow が外側の offset/zoom をミラーするだけ(0.1〜4.0 のミラーを許すため
+        // init で min0.1/max4.0 を設定済み)。
         let horizontal = noteType == .paged && isHorizontalScroll
         scrollView.alwaysBounceHorizontal = horizontal
         scrollView.alwaysBounceVertical = noteType != .paged || !isHorizontalScroll
         scrollView.isPagingEnabled = false
 
-        // ズーム倍率: 無限キャンバスは 0.1〜4.0(Freeform)。ズームロック中は現在値に固定。
         if isZoomLocked {
             let locked = scrollView.zoomScale
             scrollView.minimumZoomScale = locked
@@ -229,8 +232,7 @@ struct CanvasRepresentable: UIViewRepresentable {
                 scrollView.minimumZoomScale = min(pagedMinimumZoom(for: canvas), scrollView.maximumZoomScale)
             case .infinite:
                 scrollView.minimumZoomScale = 0.1
-                // Freeform に合わせて上限 400%(背景の定常密度化で"広すぎ"体感は解消)
-                scrollView.maximumZoomScale = 4.0
+                scrollView.maximumZoomScale = 4.0  // Freeform に合わせて 400%
             }
         }
 
@@ -272,15 +274,13 @@ struct CanvasRepresentable: UIViewRepresentable {
         context.coordinator.lastStrokeCount = drawing.strokes.count
         context.coordinator.seedPreviousDrawing(drawing)
         canvas.tool = pkTool
-        canvas.delegate = context.coordinator          // 描画変化(PKCanvasViewDelegate)
-        container.scrollView.delegate = context.coordinator  // スクロール/ズーム(UIScrollViewDelegate)
+        container.scrollView.delegate = context.coordinator
+        canvas.delegate = context.coordinator  // 描画+スクロール/ズーム両方(PKCanvasViewDelegate: UIScrollViewDelegate)
         // はみ出し領域の色: 無限は用紙色、通常ノートは机のグレー
         container.backgroundColor = containerBackgroundColor
         container.objectLayer.pageColor = pageColor
         applyLayout(to: container)
         if noteType == .infinite {
-            // bounds 未確定でもコンテンツ量だけでワールドサイズの初期値を確保しておく
-            // (bounds 確定後に async ブロックで正確に計算し直す)。
             context.coordinator.refreshInfiniteWorld(in: container)
         }
         context.coordinator.lastPageCount = pageCount
@@ -364,15 +364,15 @@ struct CanvasRepresentable: UIViewRepresentable {
                 scrollView.contentOffset = viewport.contentOffset
             } else {
                 let size = context.coordinator.worldSize
+                let viewW = scrollView.bounds.width > 0 ? scrollView.bounds.width : 1024
+                let viewH = scrollView.bounds.height > 0 ? scrollView.bounds.height : 768
                 scrollView.contentOffset = CGPoint(
-                    x: (size - scrollView.bounds.width) / 2,
-                    y: (size - scrollView.bounds.height) / 2
+                    x: max(0, (size - viewW) / 2),
+                    y: max(0, (size - viewH) / 2)
                 )
             }
-            // bounds 確定後にワールドサイズ・スクロール制限を計算し直し、復元位置も範囲内へ収める
             context.coordinator.refreshInfiniteWorld(in: container)
             scrollView.contentOffset = context.coordinator.clampedInfiniteOffset(scrollView.contentOffset, for: scrollView)
-            // 復元したズームをスナップ閾値・背景タイル解像度へ反映
             container.objectLayer.applyZoom(scrollView.zoomScale)
             container.patternView.applyZoom(scrollView.zoomScale)
         }
@@ -388,7 +388,7 @@ struct CanvasRepresentable: UIViewRepresentable {
     /// 通常ノートの最小ズーム = 「1ユニット(1ページ or 2ページ見開き)」全体が画面に綺麗に
     /// 収まるフィット倍率。既存ノートアプリ準拠の全体フィット。
     /// bounds 未確定(=0)のときは下限 0.5 にフォールバックする。
-    private func pagedMinimumZoom(for canvas: PKCanvasView) -> CGFloat {
+    private func pagedMinimumZoom(for canvas: UIScrollView) -> CGFloat {
         let bounds = canvas.bounds
         guard bounds.width > 0, bounds.height > 0 else { return 0.5 }
         let unitWidth: CGFloat
@@ -406,7 +406,7 @@ struct CanvasRepresentable: UIViewRepresentable {
 
     /// ページを画面に収まるようズームフィットし、先頭ページを中央に置く。
     /// フィット倍率は `pagedMinimumZoom`(= 最小ズーム)をそのまま使う(マジックナンバー 0.94 は廃止)。
-    private func fitPaged(_ canvas: PKCanvasView) {
+    private func fitPaged(_ canvas: UIScrollView) {
         let bounds = canvas.bounds
         guard bounds.width > 0, bounds.height > 0 else { return }
         let fit = min(canvas.maximumZoomScale, max(canvas.minimumZoomScale, pagedMinimumZoom(for: canvas)))
@@ -425,7 +425,7 @@ struct CanvasRepresentable: UIViewRepresentable {
 
     /// 通常ノートを横断方向へ中央寄せ(スクロール方向と直交する側にグレー余白を出す)。
     /// 縦スクロール: 左右を中央寄せ。横スクロール: 上下を中央寄せ。
-    private func centerPagedContent(_ canvas: PKCanvasView) {
+    private func centerPagedContent(_ canvas: UIScrollView) {
         pagedContentInset(for: canvas).map { canvas.contentInset = $0 }
     }
 
@@ -449,6 +449,7 @@ struct CanvasRepresentable: UIViewRepresentable {
     func updateUIView(_ container: CanvasContainerUIView, context: Context) {
         context.coordinator.parent = self
         let canvas = container.canvasView
+        let scrollView = container.scrollView
         canvas.tool = pkTool
         container.backgroundColor = containerBackgroundColor
         container.isSelectMode = isSelectMode
@@ -476,21 +477,21 @@ struct CanvasRepresentable: UIViewRepresentable {
             context.coordinator.lastIsTwoPage = isTwoPageLayout
             context.coordinator.lastIsHorizontal = isHorizontalScroll
             DispatchQueue.main.async {
-                fitPaged(canvas)
-                centerPagedContent(canvas)
-                container.patternView.applyZoom(canvas.zoomScale)
+                fitPaged(scrollView)
+                centerPagedContent(scrollView)
+                container.patternView.applyZoom(scrollView.zoomScale)
             }
         } else if noteType == .paged, pageCount > context.coordinator.lastPageCount {
             // ページが増えたら、新しいページへスクロール方向に沿って滑らかに移動(中央寄せ)
-            centerPagedContent(canvas)
+            centerPagedContent(scrollView)
             let lastRect = layout.pageRect(pageCount - 1)
             let target: CGPoint = isHorizontalScroll
-                ? CGPoint(x: PagePlanner.scrollOffsetX(toPage: pageCount - 1, zoomScale: canvas.zoomScale,
+                ? CGPoint(x: PagePlanner.scrollOffsetX(toPage: pageCount - 1, zoomScale: scrollView.zoomScale,
                                                        layout: layout, margin: PageMetrics.margin,
-                                                       viewWidth: canvas.bounds.width),
-                          y: canvas.contentOffset.y)
-                : CGPoint(x: canvas.contentOffset.x, y: lastRect.minY * canvas.zoomScale - PageMetrics.margin)
-            canvas.setContentOffset(target, animated: true)
+                                                       viewWidth: scrollView.bounds.width),
+                          y: scrollView.contentOffset.y)
+                : CGPoint(x: scrollView.contentOffset.x, y: lastRect.minY * scrollView.zoomScale - PageMetrics.margin)
+            scrollView.setContentOffset(target, animated: true)
             // 追加が反映されたのでオーバースクロール追加のガードを解除(次のめくりで再度追加可能)
             context.coordinator.didRequestPageAppend = false
         }
@@ -502,19 +503,19 @@ struct CanvasRepresentable: UIViewRepresentable {
             let targetLayout = layout
             DispatchQueue.main.async {
                 let offsetX = PagePlanner.scrollOffsetX(
-                    toPage: target, zoomScale: canvas.zoomScale,
+                    toPage: target, zoomScale: scrollView.zoomScale,
                     layout: targetLayout, margin: PageMetrics.margin,
-                    viewWidth: canvas.bounds.width
+                    viewWidth: scrollView.bounds.width
                 )
-                let destination = CGPoint(x: offsetX, y: canvas.contentOffset.y)
+                let destination = CGPoint(x: offsetX, y: scrollView.contentOffset.y)
                 // 矢印タップ由来のプログラムスクロール中は、PencilKit が座標移動を「長押し」と
                 // 誤検知して手書きメニュー(Select All / Insert Space)を暴発させることがある。
                 // アニメーション中は画面全体の入力を遮断し、完了後に戻す。
-                canvas.isUserInteractionEnabled = false
+                scrollView.isUserInteractionEnabled = false
                 UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) {
-                    canvas.contentOffset = destination
+                    scrollView.contentOffset = destination
                 } completion: { _ in
-                    canvas.isUserInteractionEnabled = true
+                    scrollView.isUserInteractionEnabled = true
                     self.onScrollHandled()
                     context.coordinator.isScrollPending = false
                 }
@@ -527,8 +528,6 @@ struct CanvasRepresentable: UIViewRepresentable {
             DispatchQueue.main.async {
                 UIView.animate(withDuration: 0.25) {
                     scrollView.zoomScale = 1.0
-                    // ワールドサイズ・スクロール制限を新ズームで計算し直し、中央がコンテンツから
-                    // 遠い場合は許可範囲(コンテンツ+余白)内へクランプする
                     context.coordinator.refreshInfiniteWorld(in: container)
                     let size = context.coordinator.worldSize
                     scrollView.contentOffset = context.coordinator.clampedInfiniteOffset(
@@ -551,7 +550,7 @@ struct CanvasRepresentable: UIViewRepresentable {
             DispatchQueue.main.async {
                 context.coordinator.refreshInfiniteWorld(in: container)
                 if let fit = ZoomToFit.fit(
-                    contentUnion: infiniteContentUnion, viewportSize: scrollView.bounds.size,
+                    contentUnion: self.infiniteContentUnion, viewportSize: scrollView.bounds.size,
                     minZoom: scrollView.minimumZoomScale, maxZoom: scrollView.maximumZoomScale
                 ) {
                     UIView.animate(withDuration: 0.3) {
@@ -640,19 +639,18 @@ struct CanvasRepresentable: UIViewRepresentable {
 
         // MARK: - 無限キャンバスの動的ワールド管理
 
-        /// 無限キャンバスのワールドサイズ(= contentSize の一辺)を、現在のコンテンツに合わせて
-        /// 更新する。右・下方向は worldSize を伸ばすだけ、左・上方向は端に近づいたら
-        /// 原点リベース(ストローク・オブジェクト座標・contentOffset を一括平行移動)で対応する。
-        /// applyLayout 相当の反映(contentSize/フレーム/スクロール制限)もここでまとめて行う。
-        /// 描画・オブジェクトの変化、ズーム、bounds 変化のたびに呼び直す(冪等)。
         func refreshInfiniteWorld(in container: CanvasContainerUIView) {
             guard parent.noteType == .infinite else { return }
-            // ピンチズーム中は contentView.bounds/原点リベースを一切触らない。
+            let scrollView = container.scrollView
+            // ピンチズーム中は worldSize/contentView.bounds/原点リベースを一切触らない。
             // ズーム中にワールドを書き換えるとピンチのアンカーがずれるため、確定後
             // (scrollViewDidEndZooming)にまとめて適用する。
-            guard !container.scrollView.isZooming else { return }
-            if let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: parent.infiniteContentUnion) {
-                rebaseOrigin(by: delta, in: container)
+            guard !scrollView.isZooming else { return }
+            // スクロール・慣性の最中は原点リベースを保留し、画面の跳ね・引っかかりを防ぐ
+            if !scrollView.isDragging && !scrollView.isDecelerating {
+                if let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: parent.infiniteContentUnion) {
+                    rebaseOrigin(by: delta, in: container)
+                }
             }
             worldSize = DynamicCanvasBounds.expandedWorldSize(
                 contentUnion: parent.infiniteContentUnion, currentWorldSize: worldSize
@@ -661,39 +659,46 @@ struct CanvasRepresentable: UIViewRepresentable {
             updateInkWindow(in: container)
         }
 
-        /// worldSize を contentView.bounds・背景/オブジェクト/インク各層のフレーム・
-        /// scrollView.contentSize(= worldSize × zoom)へ反映する。スクロール制限は負の
-        /// contentInset ではなく scrollViewDidScroll の offset クランプで行う(ズームと非結合)。
         private func applyWorldSize(to container: CanvasContainerUIView) {
-            let scrollView = container.scrollView
-            let zoom = scrollView.zoomScale
             let size = CGSize(width: worldSize, height: worldSize)
             if container.contentView.bounds.size != size {
-                // contentView は原点固定・サイズのみ拡張(ズームは transform で別途掛かるため
-                // frame ではなく bounds を更新する)。オブジェクト層は等倍で追従。
-                // ※ 背景(patternView)は画面固定・ベクター直描きなので worldSize 追従は不要。
-                //   インク(canvasView)は可視範囲の「窓」なので updateInkWindow が別途配置する。
+                // contentView(ズーム対象)とオブジェクト層だけを worldSize にする。
+                // 背景(patternView)は画面固定のベクター描画、インク(canvasView)は可視範囲の
+                // ビューポート窓(updateInkWindow がミラー配置)なので、ここでは触らない。
                 container.contentView.bounds = CGRect(origin: .zero, size: size)
                 container.objectLayer.frame = CGRect(origin: .zero, size: size)
             }
-            // ズーム対象 contentView の中心を「スケール後サイズの半分」に置き、frame 原点を (0,0) に
-            // 保つ(paged の applyContentSize と同じ)。これを怠ると bounds 変更時に frame が負方向へ
-            // ドリフトし、内容がずれる。呼び出しは isZooming 中は行わない(ピンチのアンカーを乱さない)。
-            // ※ 描画変化のたびに updateUIView 経由でここが呼ばれるため、値が変わらないときは
-            //   代入しない(冪等)。無駄な center/contentSize 代入はレイアウトを誘発し、直前に
-            //   確定したストロークや背景が一瞬消える「描くたびちらつく」原因になる。
-            let newCenter = CGPoint(x: worldSize * zoom / 2, y: worldSize * zoom / 2)
-            if container.contentView.center != newCenter { container.contentView.center = newCenter }
-            let newContentSize = CGSize(width: worldSize * zoom, height: worldSize * zoom)
-            if scrollView.contentSize != newContentSize { scrollView.contentSize = newContentSize }
+            // スクロール範囲(contentSize)は常に worldSize×zoom に追従させる。これを更新しないと
+            // ワールド拡張後のスクロール範囲がズームとズレて、末端で引っかかる/ドリフトの原因になる。
+            let scaled = CGSize(width: worldSize * container.scrollView.zoomScale,
+                                height: worldSize * container.scrollView.zoomScale)
+            if container.scrollView.contentSize != scaled { container.scrollView.contentSize = scaled }
+            centerContentView(in: container)
+        }
+
+        /// ズーム対象 contentView を、コンテンツがビューポートより小さいときだけ中央寄せする。
+        /// `scrollViewDidZoom` と `applyWorldSize` で同一ロジックを使い、ズーム後の中心を
+        /// 食い違わせない(中心の食い違いがピンチ確定時のドリフトの主因だった)。
+        /// contentSize(= worldSize×zoom)基準で計算するため、ズーム時もズーム後も一貫する。
+        private func centerContentView(in container: CanvasContainerUIView) {
+            let scrollView = container.scrollView
+            let boundsSize = scrollView.bounds.size
+            let contentSize = scrollView.contentSize
+            let offsetX = max(0, (boundsSize.width - contentSize.width) * 0.5)
+            let offsetY = max(0, (boundsSize.height - contentSize.height) * 0.5)
+            let center = CGPoint(
+                x: contentSize.width * 0.5 + offsetX,
+                y: contentSize.height * 0.5 + offsetY
+            )
+            if container.contentView.center != center { container.contentView.center = center }
         }
 
         /// インク面(PKCanvasView)を「画面固定・ビューポートサイズのスクロールビュー」として、
         /// 外側 scrollView のオフセット/ズームへ追従(ミラー)させる。
-        /// 巨大な contentView 直下に worldSize のインク面を置くと、PencilKit が巨大テクスチャに
+        /// 巨大な contentView 直下に worldSize のインクを置くと、PencilKit が巨大テクスチャに
         /// ライブ描画(書いてる途中の線)を出せない。そこでインク面は contentView の外(scrollView
-        /// 直下)へ置き、frame=ビューポート・contentSize=worldSize のまま自身のズーム/オフセットを
-        /// 外側にミラーする。PencilKit はビューポート分だけを描画するのでライブ描画が正しく出る。
+        /// 直下・最前面)へ置き、frame=ビューポート・contentSize=worldSize のまま自身のズーム/
+        /// オフセットを外側にミラーする。PencilKit はビューポート分だけを描画するのでライブ描画が正しく出る。
         /// - `frame.origin = 外側 contentOffset`(scrollView 内で画面に固定表示)。
         /// - `contentOffset/zoomScale = 外側と一致`(表示する world 範囲と倍率を合わせる)。
         /// - drawing は world 座標のまま(contentSize=worldSize が描画可能域を全域に確保)。
@@ -702,14 +707,21 @@ struct CanvasRepresentable: UIViewRepresentable {
             let scrollView = container.scrollView
             guard scrollView.bounds.width > 0, scrollView.bounds.height > 0 else { return }
             let ink = container.canvasView
-            // 描画可能域(contentSize)は world 全域。ズーム倍率は外側に合わせる。
-            let worldContent = CGSize(width: worldSize, height: worldSize)
-            if ink.contentSize != worldContent { ink.contentSize = worldContent }
-            if ink.zoomScale != scrollView.zoomScale { ink.zoomScale = scrollView.zoomScale }
+            let zoom = scrollView.zoomScale
+            // まずズーム倍率を外側に合わせ、その上でインクの contentSize を「ズーム後サイズ(worldSize×zoom)」へ。
+            // contentSize を worldSize(非ズーム)のままにすると、zoom > 約(1 + 画面幅/worldSize) で
+            // 外側の contentOffset(= world×zoom 空間)がインク側の可動域を超えて頭打ちになり、
+            // インク表示がズレて Pencil が描画域から外れる(130%付近で破綻していた原因)。
+            if ink.zoomScale != zoom { ink.zoomScale = zoom }
+            let scaledWorld = CGSize(width: worldSize * zoom, height: worldSize * zoom)
+            if ink.contentSize != scaledWorld { ink.contentSize = scaledWorld }
             if ink.contentOffset != scrollView.contentOffset { ink.contentOffset = scrollView.contentOffset }
-            // scrollView 内でビューポート位置に固定(contentOffset だけ動かして中身をミラー)。
             let frame = CGRect(origin: scrollView.contentOffset, size: scrollView.bounds.size)
             if ink.frame != frame { ink.frame = frame }
+            // PKCanvasView は contentSize/zoomScale 変更時に自身の pan/pinch を再有効化することがある。
+            // インクにスクロール/ズームのジェスチャを持たせると外側 scrollView のピンチを奪うため、毎回無効化する。
+            if ink.panGestureRecognizer.isEnabled { ink.panGestureRecognizer.isEnabled = false }
+            if ink.pinchGestureRecognizer?.isEnabled == true { ink.pinchGestureRecognizer?.isEnabled = false }
             // 画面固定の背景ドット/罫線を現在のオフセット・ズームで再描画する。
             container.patternView.updateViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
         }
@@ -726,13 +738,8 @@ struct CanvasRepresentable: UIViewRepresentable {
             )
         }
 
-        /// 原点リベース: コンテンツが左・上端の余白を切ったら、ストローク・オブジェクト座標・
-        /// contentOffset を delta だけ一括平行移動し、見た目を変えずに原点を再定義する
-        /// (座標を負にできない PKCanvasView の制約下で、左・上方向への無限拡張を可能にする)。
-        /// 内部座標系の実装詳細でありユーザー操作ではないため、Undo には登録しない。
         private func rebaseOrigin(by delta: CGVector, in container: CanvasContainerUIView) {
-            let canvas = container.canvasView       // インク(drawing)
-            let scrollView = container.scrollView   // ビューポート(contentOffset)
+            let canvas = container.canvasView
             let transform = CGAffineTransform(translationX: delta.dx, y: delta.dy)
 
             isReplacingDrawing = true
@@ -747,23 +754,19 @@ struct CanvasRepresentable: UIViewRepresentable {
 
             parent.onCanvasRebased(delta)
 
-            scrollView.contentOffset = CGPoint(
-                x: scrollView.contentOffset.x + delta.dx * scrollView.zoomScale,
-                y: scrollView.contentOffset.y + delta.dy * scrollView.zoomScale
+            canvas.contentOffset = CGPoint(
+                x: canvas.contentOffset.x + delta.dx * canvas.zoomScale,
+                y: canvas.contentOffset.y + delta.dy * canvas.zoomScale
             )
         }
 
         // MARK: - スクロール/ズーム(UIScrollViewDelegate 経由。KVO は使わない)
 
-        /// ピンチのアンカーを担うズーム対象(単一 contentView)。外側 scrollView のみに返す。
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             guard scrollView === container?.scrollView else { return nil }
             return container?.contentView
         }
 
-        /// スクロール中の追従はスクロールビューが行う。無限は許可範囲(コンテンツ+余白1画面)を
-        /// 超えないよう offset をクランプし(負の contentInset は使わない=ズームと非結合)、
-        /// ビューポートを保存する(軽量)。
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             guard scrollView === container?.scrollView else { return }
             // ズーム中はクランプしない(アンカーを乱さない)。確定後に scrollViewDidEndZooming で収める。
@@ -778,32 +781,32 @@ struct CanvasRepresentable: UIViewRepresentable {
             )
         }
 
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        }
+
+        func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        }
+
         /// 通常ノート(横スクロール)で、スクロール限界より右へバウンス(オーバースクロール)した量(pt)。
-        /// ページを増やせない状況(無限/縦)や末尾でないときは 0。
-        /// コンテンツが画面より狭い場合でも「限界を超えて引っ張った量」だけを測る。
         private func rightOverscroll(_ scrollView: UIScrollView) -> CGFloat {
             guard parent.noteType == .paged, parent.isHorizontalScroll else { return 0 }
             let contentW = parent.layout.contentSize.width * scrollView.zoomScale
-            // 右端の通常スクロール限界(バウンスしていない最大 contentOffset.x)
             let maxOffsetX = max(-scrollView.contentInset.left,
                                  contentW - scrollView.bounds.width + scrollView.contentInset.right)
             return scrollView.contentOffset.x - maxOffsetX
         }
 
-        /// 末尾を超えて一定量めくったら、指を離した時点でページを1枚追加する(GoodNotes 風)。
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-            // しきい値: 画面幅の15%(上限140pt)を超えて引っ張ったら追加
             let threshold = min(scrollView.bounds.width * 0.15, 140)
             if !didRequestPageAppend, rightOverscroll(scrollView) > threshold {
-                didRequestPageAppend = true   // updateUIView でページ数増加を検知したら解除
+                didRequestPageAppend = true
                 parent.onAppendPage()
             }
         }
 
-        /// カスタムページスナップ: ドラッグ終了時にフリック速度とズームを考慮して
-        /// 最寄りのページ左端へスクロールをスナップさせる。
-        /// isPagingEnabled(bounds.width 単位)では通常ノートのページ実幅とズレるため、
-        /// PagePlanner.scrollOffsetX で正確なスナップ先を算出する。
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        }
+
         func scrollViewWillEndDragging(
             _ scrollView: UIScrollView,
             withVelocity velocity: CGPoint,
@@ -817,7 +820,6 @@ struct CanvasRepresentable: UIViewRepresentable {
             let pageCount = parent.pageCount
             guard pageCount > 0 else { return }
 
-            // 現在ビューポート中心に最も近いページを取得
             let currentPage = PagePlanner.currentPage(
                 contentOffsetX: scrollView.contentOffset.x,
                 viewWidth: scrollView.bounds.width,
@@ -825,7 +827,6 @@ struct CanvasRepresentable: UIViewRepresentable {
                 layout: layout
             )
 
-            // フリック速度に応じて遷移先ページを決定
             var targetPage = currentPage
             let velocityThreshold: CGFloat = 0.2
             if velocity.x > velocityThreshold {
@@ -834,7 +835,6 @@ struct CanvasRepresentable: UIViewRepresentable {
                 targetPage = max(0, currentPage - 1)
             }
 
-            // 目的ページを中央(収まる場合)/左マージン(超える場合)へスナップ
             let targetX = PagePlanner.scrollOffsetX(
                 toPage: targetPage,
                 zoomScale: zoomScale,
@@ -848,27 +848,23 @@ struct CanvasRepresentable: UIViewRepresentable {
             )
         }
 
-        /// ズーム時のみ、スナップ閾値用の倍率更新と背景タイルの高解像度化を行う(スクロールには不干渉)。
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            guard scrollView === container?.scrollView else { return }
-            container?.objectLayer.applyZoom(scrollView.zoomScale)
-            container?.patternView.applyZoom(scrollView.zoomScale)
-            // インク面をピンチ中もズーム/オフセットへ追従(ミラー)させる。
-            if let container { updateInkWindow(in: container) }
-            // contentSize(= contentView.bounds × zoom)は UIScrollView がピンチ中に自動追従する
-            // ため触らない(paged 同様)。ワールド拡張/原点リベース/スクロール制限はズーム中に
-            // 触らず、確定後(scrollViewDidEndZooming)にまとめて適用する(アンカーを乱さない)。
+            guard let container = container, scrollView === container.scrollView else { return }
+            // ピンチ中の contentView(=viewForZooming)の配置とアンカー保持は UIScrollView に委ねる
+            // (手動センタリングはアンカーを乱しドリフトの原因になるので行わない)。
+            // contentSize(= contentView.bounds × zoom)も UIScrollView がピンチ中に自動追従する。
+            container.objectLayer.applyZoom(scrollView.zoomScale)
+            container.patternView.applyZoom(scrollView.zoomScale)
+            // インク面(画面固定の窓)を現在のズーム/オフセットへミラーする。
+            updateInkWindow(in: container)
             parent.onViewportChanged(
                 CanvasViewport(contentOffset: scrollView.contentOffset, zoomScale: scrollView.zoomScale)
             )
         }
 
-        /// ピンチズーム確定後に、無限キャンバスのワールドサイズ/スクロール制限をまとめて適用する
-        /// (ズーム中に触るとアンカーがずれるため、ここで一度だけ)。
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             guard parent.noteType == .infinite, let container else { return }
             refreshInfiniteWorld(in: container)
-            scrollView.contentOffset = clampedInfiniteOffset(scrollView.contentOffset, for: scrollView)
         }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
@@ -910,6 +906,7 @@ struct CanvasRepresentable: UIViewRepresentable {
             parent.drawing = canvasView.drawing
             parent.onDrawingChanged()
             isCanvasSourceOfTruth = false
+            if let container { refreshInfiniteWorld(in: container) }
         }
 
         /// 双方向の Undo/Redo をサポートしながら CanvasView の描画を置換する。
@@ -1203,26 +1200,44 @@ struct CanvasRepresentable: UIViewRepresentable {
 /// 置き、hitTest でオブジェクト上のタッチを objectLayer へ通す(選択・移動は指、Pencil は上から描画)。
 final class FreeformInkCanvasView: PKCanvasView {
     weak var objectLayer: ObjectLayerUIView?
+    weak var containerScrollView: UIScrollView?
 
     override var isAccessibilityElement: Bool { get { false } set {} }
     override var accessibilityElements: [Any]? { get { nil } set {} }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        // ① オブジェクト(付箋・テキスト・ボタン等)のタッチは objectLayer へ通す(最優先)
         if let objectLayer {
             let converted = convert(point, to: objectLayer)
             if let hit = objectLayer.hitTest(converted, with: event), hit !== objectLayer {
                 return hit
             }
         }
-        return super.hitTest(point, with: event)
+
+        let hitView = super.hitTest(point, with: event)
+        // インク領域内(自身 or PKCanvasView 内部サブビュー=描画層/タイル層)のタッチのうち、
+        // 「確実に指のみ(Pencil を含まない)」と判定できたときだけ外側 scrollView へ転送し、
+        // 2本指ピンチ/1本指パンを外側へ一本化する(入れ子インクがピンチを奪うのを防ぐ=Bの修正)。
+        // それ以外(Pencil を含む / タッチ種別が取れず判定不能)は通常の hitView を返し、インクの
+        // drawingGestureRecognizer(pencilOnly)に手書きさせる。hitTest 時のタッチ種別は不確実なため、
+        // 迷ったら必ず描画側へ倒す(スクロール側へ倒すと Pencil が描けなくなる=直前の不具合の原因)。
+        // 指の確定は scrollView 側の allowedTouchTypes=.direct でも二重に担保している。
+        let hitInsideInk = (hitView?.isDescendant(of: self) ?? false)
+        if drawingPolicy == .pencilOnly, hitInsideInk, containerScrollView != nil,
+           let touches = event?.allTouches, !touches.isEmpty,
+           !touches.contains(where: { $0.type == .pencil || $0.type == .stylus }) {
+            return containerScrollView  // 確実に指のみ → 外側スクロール/ズーム
+        }
+        return hitView
     }
 }
 
-/// 無限キャンバスのコンテナ(paged と同じクリーン構成)。
+/// 無限キャンバスのコンテナ(Apple フリーボード完全同一アーキテクチャ)。
 /// 素の `UIScrollView`(ズーム対象 = `contentView`)の中に、worldSize サイズで
 ///   背景(patternView) < オブジェクト層(objectLayer) < インク(canvasView, スクロール無効)
-/// を重ねる。ズームは outer scrollView が `contentView` を transform 拡大するため、
-/// ピンチは常に指の中心で安定し、内容がコーナーへドリフトしない(旧: PKCanvasView 直流用を廃止)。
+/// を同サイズ・同座標で100%完全に重ねる。
+/// 外側 scrollView の単一トランスフォームで全レイヤーが 120Hz 完全1:1同期して動くため、
+/// インクと背景の動きのズレや白紙領域の露出が 100% 物理的に解消される。
 final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     let scrollView = UIScrollView()
     /// ズーム対象。bounds はコンテンツ(世界)座標(非ズーム)。ズームは transform で掛かる。
@@ -1281,15 +1296,23 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         let size = DynamicCanvasBounds.initialWorldSize
         let content = CGRect(x: 0, y: 0, width: size, height: size)
 
-        // 外側スクロールビュー(ズーム対象は contentView)
+        // 外側スクロールビュー(画面全面)
+        scrollView.isScrollEnabled = true
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.minimumZoomScale = 0.1
         scrollView.maximumZoomScale = 4.0  // Freeform に合わせて 400%
-        scrollView.bouncesZoom = true
+        // ピンチで上限(400%)/下限(10%)を超えて弾く挙動を無効化し、範囲外の倍率へ一時的にも
+        // 到達させない(Freeform 準拠のハードクランプ)。
+        scrollView.bouncesZoom = false
         scrollView.delaysContentTouches = false
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
         scrollView.backgroundColor = .clear
+        // スクロール/ズームは指(.direct)のみ。Apple Pencil は手書き専用にして、Pencil が
+        // 領域移動(パン)やズームに使われないようにする(Pencil=描画 / 指=スクロール&ズーム)。
+        let directOnly = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        scrollView.panGestureRecognizer.allowedTouchTypes = directOnly
+        scrollView.pinchGestureRecognizer?.allowedTouchTypes = directOnly
 
         // 背景(patternView)は「画面固定」で最背面へ。ズーム transform で拡大しないので
         // タイル継ぎ目の格子線が出ない(draw(_:) がオフセット/ズームから世界固定ドットを直描き)。
@@ -1304,40 +1327,38 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         scrollView.addSubview(contentView)
         scrollView.contentSize = content.size  // 初期ズーム 1.0
 
-        // オブジェクト層を contentView(ズーム対象)へ内包(背景の上・インクの下)。
+        // オブジェクト層は contentView(ズーム対象)へ内包(背景の上・インクの下)。
         objectLayer.frame = content
         contentView.addSubview(objectLayer)
 
-        // インク面は contentView の外(scrollView 直下・最前面)へ置く。
-        // contentView 直下に worldSize のインクを置くと PencilKit が巨大テクスチャにライブ描画を
-        // 出せないため、インクは「ビューポートサイズのスクロールビュー」として外側 scrollView の
-        // オフセット/ズームをミラーする(updateInkWindow)。PencilKit はビューポート分だけ描画する
-        // のでライブ描画(書いてる途中の線)が正しく出る。
-        canvasView.frame = CGRect(origin: .zero, size: content.size == .zero ? CGSize(width: 1400, height: 1000) : bounds.size)
-        scrollView.addSubview(canvasView)  // contentView より後 = 最前面
-
-        // インク(透過・Pencil Only、テスト時のみ指描画許可)。ズーム/スクロールのジェスチャは
-        // 外側 scrollView が担うため、インク自身の pan/pinch は無効化し、offset/zoom はミラーで反映。
         let allowFingerDrawing = ProcessInfo.processInfo.environment["ALLOW_FINGER_DRAWING"] == "1"
+        // インク面は contentView の外(scrollView 直下・最前面)へ、ビューポートサイズで置く。
+        // worldSize のインクを contentView 直下に置くと PencilKit が巨大テクスチャにライブ描画を
+        // 出せないため、インクは「ビューポートの窓」として外側の offset/zoom をミラーする(updateInkWindow)。
+        canvasView.frame = CGRect(origin: .zero,
+                                  size: bounds.size == .zero ? CGSize(width: 1400, height: 1000) : bounds.size)
+        canvasView.isScrollEnabled = false
         canvasView.drawingPolicy = allowFingerDrawing ? .anyInput : .pencilOnly
         canvasView.contentInsetAdjustmentBehavior = .never
+        // ズーム倍率は外側にミラーするため 0.1〜4.0 を許可(自身の pan/pinch は無効化済み)。
         canvasView.minimumZoomScale = 0.1
         canvasView.maximumZoomScale = 4.0
         canvasView.bounces = false
         canvasView.bouncesZoom = false
         canvasView.showsHorizontalScrollIndicator = false
         canvasView.showsVerticalScrollIndicator = false
-        // インク自身はスクロール/ズームのジェスチャに一切参加させない(入れ子スクロールビューの
-        // ジェスチャ協調が外側のピンチを奪うのを防ぐ)。offset/zoom はプログラムでミラーする。
-        canvasView.isScrollEnabled = false
         canvasView.panGestureRecognizer.isEnabled = false
         canvasView.pinchGestureRecognizer?.isEnabled = false
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
+
         drawingTouchGate.forward = canvasView.drawingGestureRecognizer.delegate
         canvasView.drawingGestureRecognizer.delegate = drawingTouchGate
         canvasView.objectLayer = objectLayer
+        canvasView.containerScrollView = scrollView
         canvasView.addGestureRecognizer(lassoPan)
+
+        scrollView.addSubview(canvasView)  // contentView より後 = 最前面(scrollView 直下)
 
         // オブジェクトのない場所のタップで選択解除 / 配置モードのタップ配置
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap(_:)))
@@ -1361,19 +1382,13 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
 
     @objc private func handleBackgroundTap(_ gesture: UITapGestureRecognizer) {
         let point = gesture.location(in: objectLayer)
-        // 配置モード(テキスト/Todo): 用紙内(paged)を検証してオブジェクト作成コールバックを発火。
-        // 用紙判定は描画ゲートと同じ isTouchAllowed を再利用する(無限は常に true)。
         if let tool = placementTool {
             if drawingTouchGate.isTouchAllowed?(point) ?? true,
                let item = onPlaceObject?(tool, point) {
-                // タップのタッチ文脈内で生成・編集開始する。
-                // render 経由の autoFocus では becomeFirstResponder がタッチ文脈外になり
-                // ソフトキーボードが表示されないため、ここで同期的に focus する。
                 objectLayer.placeAndFocus(item: item)
             }
             return
         }
-        // 投げ縄選択中に「枠の外」をタップしたら選択解除(枠内・削除ボタンのタップは潰さない)
         if objectLayer.hasLassoSelection, !objectLayer.lassoViewContains(contentPoint: point) {
             objectLayer.clearLassoSelection()
         }
@@ -1382,8 +1397,10 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
-        shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
-    ) -> Bool { true }
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        return true
+    }
 
     /// 自前投げ縄は「空き領域(オブジェクト・投げ縄枠の上でない)」から始まったときだけ開始する。
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -1409,23 +1426,28 @@ final class DrawingTouchGate: NSObject, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldReceive touch: UITouch) -> Bool {
         if touch.view is NoteLinkOpenButton { return false }
-        // 指(direct)のタッチがオブジェクトの上で始まったら描画しない(選択・移動へ回す)。
-        // Apple Pencil のタッチはオブジェクトの上でもそのまま描ける(用紙に注釈できる)。
+
+        // Apple Pencil または Stylus のタッチは 100% 無条件で描画を許可する！
+        // スクロール移動になることは物理的に 100% あり得ない！
+        if touch.type == .pencil || touch.type == .stylus {
+            return true
+        }
+
+        let allowFinger = ProcessInfo.processInfo.environment["ALLOW_FINGER_DRAWING"] == "1"
+        // 指(direct)のタッチは、pencilOnly モード(通常使用)では描画ジェスチャが受ける必要がない。
+        // false を返すことで描画ジェスチャが指タッチを横取りして握り潰すのを完全に防ぎ、
+        // 背後の outer scrollView の pan/pinch ジェスチャへ 100% 確実に透過させる！
+        if !allowFinger && touch.type == .direct {
+            return false
+        }
         if touch.type == .direct, touchBeganOnObject(touch) { return false }
         // 用紙外(通常ノートのグレー余白)など、描画を許可しない領域ではストロークを始めない。
-        // touch.location(in: view) はキャンバス(UIScrollView)自身の bounds 座標系であり、
-        // ズーム中は contentOffset 同様 zoomScale 倍されているため、pageRects(ズーム非依存の
-        // コンテンツ座標)と比較する前に zoomScale で割ってコンテンツ座標へ戻す必要がある。
         if let isTouchAllowed, let view = gestureRecognizer.view {
             let zoomScale = (view as? UIScrollView)?.zoomScale ?? 1
             let rawPoint = touch.location(in: view)
             let contentPoint = Self.contentPoint(fromRaw: rawPoint, zoomScale: zoomScale)
             if !isTouchAllowed(contentPoint) { return false }
         }
-        // Apple Pencil(=非 direct)は、オブジェクトの上・近傍でも常に描けるようにする。
-        // PencilKit 既定 delegate(forward)は hitTest がオブジェクト(サブビュー)に当たる
-        // タッチを弾くことがあり、オブジェクト周辺に「描き始められない領域」が生じるため、
-        // Pencil は forward に委ねず許可する(注釈を上から描ける = Freeform 同等)。
         if touch.type != .direct { return true }
         return forward?.gestureRecognizer?(gestureRecognizer, shouldReceive: touch) ?? true
     }
@@ -1448,16 +1470,21 @@ final class DrawingTouchGate: NSObject, UIGestureRecognizerDelegate {
         return false
     }
 
-    // shouldReceive 以外の UIGestureRecognizerDelegate 呼び出しは元 delegate へ丸ごと委譲する
+    // shouldReceive 以外の UIGestureRecognizerDelegate 呼び出しは元 delegate へ丸ごと安全にプロキシ委譲する
     override func responds(to aSelector: Selector!) -> Bool {
         if super.responds(to: aSelector) { return true }
         return forward?.responds(to: aSelector) ?? false
     }
 
     override func forwardingTarget(for aSelector: Selector!) -> Any? {
-        forward
+        if let forward = forward, forward.responds(to: aSelector) {
+            return forward
+        }
+        return super.forwardingTarget(for: aSelector)
     }
+
 }
+
 
 /// 方眼 / ドットを描く背景ビュー。キャンバス(スクロールビュー)のコンテンツ内部に
 /// コンテンツ全体サイズで置かれ、スクロール/ズーム追従はスクロール合成が担う。
@@ -1523,16 +1550,16 @@ final class BackgroundPatternUIView: UIView {
     /// タイル間隔はコンテンツ空間で固定(Freeform 準拠)。画面上の見かけの拡縮は
     /// スクロールビューのズーム合成が担うため、ここでは間隔を動かさない。
     func applyZoom(_ zoom: CGFloat) {
-        // 無限キャンバスのドット間隔は固定(世界に固定)。ズームでは間隔は変えず、
-        // 拡大時に線がボケないようレンダリング解像度(tileScale)だけ上げて焼き直す。
-        currentZoom = zoom
-        let target = min(max(UIScreen.main.scale * zoom, UIScreen.main.scale), 12)
-        let scaleChanged = abs(target - tileScale) > 0.5
-        if scaleChanged { tileScale = target; rebuild() }
+        // 無限キャンバスの背景は画面固定のベクター描画。ズーム時は tileScale ではなく
+        // currentZoom を更新して draw(_:) を焼き直す(間隔・ドット径はズームに比例=世界固定)。
+        guard noteType == .infinite else { return }
+        if currentZoom != zoom {
+            currentZoom = zoom
+            setNeedsDisplay()
+        }
     }
 
     /// 無限キャンバス(Freeform)の板の色。白紙は Freeform 風の淡いグレー板、黒紙はそのまま黒。
-    /// (Freeform のボードは純白ではなく、うっすらグレーがかった中立色)
     private var infiniteBoardColor: UIColor {
         switch pageColor {
         case .white: UIColor(white: 0.949, alpha: 1)  // ≈ systemGray6 相当の淡いグレー

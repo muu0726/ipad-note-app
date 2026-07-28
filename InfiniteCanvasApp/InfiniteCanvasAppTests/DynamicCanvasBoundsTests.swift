@@ -22,7 +22,7 @@ struct DynamicCanvasBoundsTests {
 
     @Test("コンテンツが右下の余白を切ったらワールドサイズを拡張する")
     func contentNearRightBottomEdgeExpands() {
-        let union = CGRect(x: 0, y: 0, width: 19_000, height: 500)  // maxX = 19_000, edgeMargin = 4_000
+        let union = CGRect(x: 0, y: 0, width: 19_000, height: 500)  // maxX = 19_000, edgeMargin = 2_000
         let size = DynamicCanvasBounds.expandedWorldSize(contentUnion: union, currentWorldSize: 20_000)
         #expect(size == 19_000 + DynamicCanvasBounds.edgeMargin)
     }
@@ -36,7 +36,7 @@ struct DynamicCanvasBoundsTests {
 
     @Test("コンテンツが原点付近(左上)にあれば原点リベースが必要")
     func rebaseNeededNearOrigin() {
-        let union = CGRect(x: 100, y: 8_000, width: 200, height: 200)  // minX が margin(4_000) を下回る
+        let union = CGRect(x: 100, y: 8_000, width: 200, height: 200)  // minX が margin(2_000) を下回る
         let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: union)
         #expect(delta != nil)
         #expect(delta?.dx == DynamicCanvasBounds.edgeMargin - 100)

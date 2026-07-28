@@ -1,9 +1,12 @@
 import UIKit
 
-/// 無限キャンバスのスクロール可能範囲を「コンテンツ(描画+オブジェクト)の外接矩形+余白1画面分」に
-/// 制限する計算(Freeform 風)。contentSize(固定 100,000pt)や座標系は変えず、
-/// 負の contentInset でスクロール範囲だけを絞る。コンテンツが端に近づくと外接矩形が育ち、
-/// その分だけ範囲が自動で広がる。ビュー階層に依存しない純ロジックなのでユニットテストで担保する。
+/// 無限キャンバスのスクロール可能範囲を「コンテンツ(描画+オブジェクト)の外接矩形 + 余白(画面4枚分)」へ
+/// 制限する計算(Freeform 風)。ワールドサイズは固定ではなく `DynamicCanvasBounds` が
+/// コンテンツに応じて動的に伸ばす(`canvasSize` 引数で受け取る)。制限は負の contentInset ではなく
+/// `scrollViewDidScroll` での `clampedOffset`(contentOffset のクランプ)で行い、ズームと非結合にして
+/// ドリフトを防ぐ。余白を画面4枚分と広めに取るため、コンテンツから離れても数画面ぶん自由に
+/// スクロールでき(borderless に近い体感)、遠くの空白はゆるくコンテンツ側へバウンスして戻る。
+/// ビュー階層に依存しない純ロジックなのでユニットテストで担保する。
 enum InfiniteScrollLimiter {
     /// スクロールを許可する領域(コンテンツ座標)。
     /// - Parameters:
@@ -18,20 +21,20 @@ enum InfiniteScrollLimiter {
         canvasSize: CGFloat
     ) -> CGRect {
         let zoom = max(zoomScale, 0.01)
-        // 余白: 現在のズームで画面1枚分(コンテンツ座標)
-        let marginW = viewportSize.width / zoom
-        let marginH = viewportSize.height / zoom
+        // 余白: 現在のズームで画面4枚分(コンテンツ座標)を常に確保し、自由なピンチ/パンをクランプで邪魔しない
+        let marginW = viewportSize.width / zoom * 4
+        let marginH = viewportSize.height / zoom * 4
 
         var allowed: CGRect
         if let union = contentUnion, !union.isNull, !union.isEmpty {
             allowed = union.insetBy(dx: -marginW, dy: -marginH)
         } else {
-            // 空ノート: キャンバス中央の1画面 + 周囲に余白1画面分
+            // 空ノート: キャンバス中央を中心として十分広い可動域を確保
             let center = canvasSize / 2
             allowed = CGRect(
-                x: center - marginW / 2, y: center - marginH / 2,
-                width: marginW, height: marginH
-            ).insetBy(dx: -marginW, dy: -marginH)
+                x: center - marginW, y: center - marginH,
+                width: marginW * 2, height: marginH * 2
+            )
         }
 
         // ビューポートより狭いと contentOffset の可動域が負になるため、最低1画面分を対称に保証

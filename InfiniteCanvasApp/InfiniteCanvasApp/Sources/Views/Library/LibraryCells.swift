@@ -5,6 +5,8 @@ import CoreData
 struct FolderCell: View {
     @ObservedObject var folder: Folder
     @ObservedObject var actions: LibraryActionCoordinator
+    var isSelectMode: Bool = false
+    var isSelected: Bool = false
     let onOpen: () -> Void
     @Environment(\.managedObjectContext) private var context
     @State private var isDropTargeted = false
@@ -12,18 +14,27 @@ struct FolderCell: View {
     var body: some View {
         Button(action: onOpen) {
             VStack(spacing: 8) {
-                ZStack {
+                ZStack(alignment: .topTrailing) {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(isDropTargeted ? Color.accentColor.opacity(0.25)
                                              : Color(.secondarySystemBackground))
                     Image(systemName: "folder.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(.tint)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if isSelectMode {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                            .background(Circle().fill(Color.white).padding(2))
+                            .padding(8)
+                    }
                 }
                 .aspectRatio(4 / 3, contentMode: .fit)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(isDropTargeted ? Color.accentColor : .clear, lineWidth: 2)
+                        .strokeBorder(isSelected ? Color.accentColor : (isDropTargeted ? Color.accentColor : .clear), lineWidth: isSelected ? 2.5 : 2)
                 )
                 Text(folder.displayName)
                     .font(.callout)
@@ -35,7 +46,9 @@ struct FolderCell: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            ItemContextMenu(item: .folder(folder), actions: actions)
+            if !isSelectMode {
+                ItemContextMenu(item: .folder(folder), actions: actions)
+            }
         }
         .draggable(LibraryItemTransfer(item: .folder(folder)))
         .dropDestination(for: LibraryItemTransfer.self) { items, _ in
@@ -49,32 +62,43 @@ struct FolderCell: View {
 struct NoteCell: View {
     @ObservedObject var note: NoteFile
     @ObservedObject var actions: LibraryActionCoordinator
+    var isSelectMode: Bool = false
+    var isSelected: Bool = false
     let onOpen: () -> Void
 
     var body: some View {
         Button(action: onOpen) {
             VStack(spacing: 8) {
-                // サムネイルは必ずタイル枠内に収めてクリップする
-                // (scaledToFill のはみ出しで隣のノートとくっついて見えるのを防ぐ)
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(.systemBackground))
-                    .aspectRatio(4 / 3, contentMode: .fit)
-                    .overlay {
-                        if let data = note.thumbnailData, let image = UIImage(data: data) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFill()
-                        } else {
-                            Image(systemName: note.canvasNoteType.icon)
-                                .font(.system(size: 36))
-                                .foregroundStyle(.quaternary)
+                ZStack(alignment: .topTrailing) {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(.systemBackground))
+                        .aspectRatio(4 / 3, contentMode: .fit)
+                        .overlay {
+                            if let data = note.thumbnailData, let image = UIImage(data: data) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                            } else {
+                                Image(systemName: note.canvasNoteType.icon)
+                                    .font(.system(size: 36))
+                                    .foregroundStyle(.quaternary)
+                            }
                         }
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                    if isSelectMode {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                            .background(Circle().fill(Color.white).padding(2))
+                            .padding(8)
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .strokeBorder(Color(.separator), lineWidth: 0.5)
-                    )
+                }
+                .aspectRatio(4 / 3, contentMode: .fit)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(isSelected ? Color.accentColor : Color(.separator), lineWidth: isSelected ? 2.5 : 0.5)
+                )
                 Text(note.displayTitle)
                     .font(.callout)
                     .lineLimit(1)
@@ -85,7 +109,9 @@ struct NoteCell: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            ItemContextMenu(item: .note(note), actions: actions)
+            if !isSelectMode {
+                ItemContextMenu(item: .note(note), actions: actions)
+            }
         }
         .draggable(LibraryItemTransfer(item: .note(note)))
         .accessibilityIdentifier("grid-note-\(note.displayTitle)")

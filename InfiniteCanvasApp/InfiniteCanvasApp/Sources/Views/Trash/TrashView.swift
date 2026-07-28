@@ -5,6 +5,7 @@ import CoreData
 /// (フォルダごと削除された中身はフォルダ復元・削除に追従する)
 struct TrashView: View {
     @Environment(\.managedObjectContext) private var context
+    @EnvironmentObject private var session: OpenNotesSession
 
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(key: "trashedAt", ascending: false)],
@@ -47,6 +48,7 @@ struct TrashView: View {
         ) {
             Button("すべて完全に削除", role: .destructive) {
                 LibraryService.emptyTrash(in: context)
+                session.closeTrashedNotes()
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
@@ -63,6 +65,7 @@ struct TrashView: View {
             Button("完全に削除", role: .destructive) {
                 if let target = permanentDeleteTarget {
                     LibraryService.deletePermanently(target, in: context)
+                    session.closeTrashedNotes()
                 }
                 permanentDeleteTarget = nil
             }

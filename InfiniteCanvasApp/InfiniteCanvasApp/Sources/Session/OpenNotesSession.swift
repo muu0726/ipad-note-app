@@ -147,24 +147,34 @@ final class OpenNotesSession: ObservableObject {
         persistState()
     }
 
-    /// ゴミ箱行き・削除されたノートのタブを閉じる
+    /// ゴミ箱行き・削除されたノート(親フォルダがゴミ箱行きのもの含む)のタブを閉じる
     func closeTrashedNotes() {
         // 分割中の左右がゴミ箱行きなら先に分割を畳む(ダングリング防止)
         if isSplitActive {
-            let deadSide = openNotes.contains { ($0.isTrashed || $0.isDeleted)
+            let deadSide = openNotes.contains { isTrashedOrInTrashedFolder($0)
                 && ($0.objectID == leftNoteID || $0.objectID == rightNoteID) }
             if deadSide {
                 let keep = openNotes.first {
-                    !($0.isTrashed || $0.isDeleted)
+                    !isTrashedOrInTrashedFolder($0)
                     && ($0.objectID == leftNoteID || $0.objectID == rightNoteID)
                 }
                 deactivateSplit()
                 if let keep { selectedNote = keep }
             }
         }
-        for note in openNotes.filter({ $0.isTrashed || $0.isDeleted }) {
+        for note in openNotes.filter({ isTrashedOrInTrashedFolder($0) }) {
             close(note)
         }
+    }
+
+    private func isTrashedOrInTrashedFolder(_ note: NoteFile) -> Bool {
+        if note.isTrashed || note.isDeleted { return true }
+        var current = note.folder
+        while let folder = current {
+            if folder.isTrashed || folder.isDeleted { return true }
+            current = folder.parent
+        }
+        return false
     }
 
     // MARK: - スプリットビュー制御

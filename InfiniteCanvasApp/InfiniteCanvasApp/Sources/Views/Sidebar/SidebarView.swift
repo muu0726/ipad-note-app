@@ -54,7 +54,7 @@ struct SidebarView: View {
                     .tag(SidebarSelection.trash)
             }
         }
-        .navigationTitle("ノート")
+        .navigationTitle("Sproutnote ver25.0 (Auto Tab Cleanup Engine)")
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 6) {
                 // 作成先を明示(IDE のように「今どこに作るか」が分かるように)

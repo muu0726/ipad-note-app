@@ -10,36 +10,36 @@ struct InfiniteScrollLimiterTests {
     private let canvasSize: CGFloat = 100_000
     private let viewport = CGSize(width: 1000, height: 800)
 
-    @Test("空ノートはキャンバス中央の1画面+余白1画面分に制限される")
+    @Test("空ノートはキャンバス中央を中心に画面4枚分の余白で制限される")
     func emptyNoteIsCenteredAroundCanvasCenter() {
         let allowed = InfiniteScrollLimiter.allowedRect(
             contentUnion: nil, viewportSize: viewport, zoomScale: 1, canvasSize: canvasSize
         )
         #expect(allowed.midX == canvasSize / 2)
         #expect(allowed.midY == canvasSize / 2)
-        // 中央1画面 + 両側に1画面ずつ = 3画面分
-        #expect(allowed.width == viewport.width * 3)
-        #expect(allowed.height == viewport.height * 3)
+        // 中央から両側に画面4枚分ずつ = 画面8枚分(borderless に近い自由スクロール)
+        #expect(allowed.width == viewport.width * 8)
+        #expect(allowed.height == viewport.height * 8)
     }
 
-    @Test("コンテンツがあると外接矩形+余白1画面分が許可範囲になる")
-    func contentUnionGetsOneScreenMargin() {
+    @Test("コンテンツがあると外接矩形+余白(画面4枚分)が許可範囲になる")
+    func contentUnionGetsFourScreenMargin() {
         let union = CGRect(x: 49_000, y: 49_500, width: 2_000, height: 1_000)
         let allowed = InfiniteScrollLimiter.allowedRect(
             contentUnion: union, viewportSize: viewport, zoomScale: 1, canvasSize: canvasSize
         )
-        #expect(allowed == union.insetBy(dx: -viewport.width, dy: -viewport.height))
+        #expect(allowed == union.insetBy(dx: -viewport.width * 4, dy: -viewport.height * 4))
     }
 
-    @Test("ズームアウト時は余白がコンテンツ座標で拡大する(画面1枚分を維持)")
+    @Test("ズームアウト時は余白がコンテンツ座標で拡大する(画面4枚分を維持)")
     func marginScalesWithZoom() {
         let union = CGRect(x: 50_000, y: 50_000, width: 100, height: 100)
         let zoom: CGFloat = 0.5
         let allowed = InfiniteScrollLimiter.allowedRect(
             contentUnion: union, viewportSize: viewport, zoomScale: zoom, canvasSize: canvasSize
         )
-        // 0.5倍ズームでは画面1枚分 = 2倍のコンテンツ幅
-        #expect(allowed == union.insetBy(dx: -viewport.width / zoom, dy: -viewport.height / zoom))
+        // 0.5倍ズームでは画面4枚分 = 2倍 × 4 のコンテンツ幅
+        #expect(allowed == union.insetBy(dx: -viewport.width / zoom * 4, dy: -viewport.height / zoom * 4))
     }
 
     @Test("小さいコンテンツでも許可範囲は最低1画面分を保つ")

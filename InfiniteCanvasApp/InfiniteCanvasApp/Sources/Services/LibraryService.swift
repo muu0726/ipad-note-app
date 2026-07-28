@@ -8,13 +8,62 @@ import OSLog
 enum LibraryService {
     private static let logger = Logger(subsystem: "com.muu0726.InfiniteCanvasApp", category: "LibraryService")
 
+    // MARK: - 重複回避(PC ファイルシステム同等)
+
+    /// 指定フォルダ(nilはルート)内で、フォルダ名が重複しないユニークな名前を生成する(例: 「新規フォルダ 2」)。
+    static func uniqueFolderName(base: String, parent: Folder?, in context: NSManagedObjectContext, ignoringFolderID: NSManagedObjectID? = nil) -> String {
+        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "新規フォルダ" : trimmed
+        
+        let request = Folder.fetchRequest()
+        if let parent {
+            request.predicate = NSPredicate(format: "parent == %@ AND isTrashed == NO", parent)
+        } else {
+            request.predicate = NSPredicate(format: "parent == nil AND isTrashed == NO")
+        }
+        let existing = (try? context.fetch(request)) ?? []
+        let existingNames = Set(existing.filter { $0.objectID != ignoringFolderID }.map { $0.name ?? "" })
+        
+        if !existingNames.contains(name) { return name }
+        
+        var index = 2
+        while existingNames.contains("\(name) \(index)") {
+            index += 1
+        }
+        return "\(name) \(index)"
+    }
+
+    /// 指定フォルダ(nilはルート)内で、ノートタイトルが重複しないユニークなタイトルを生成する(例: 「無題ノート 2」)。
+    static func uniqueNoteTitle(base: String, folder: Folder?, in context: NSManagedObjectContext, ignoringNoteID: NSManagedObjectID? = nil) -> String {
+        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmed.isEmpty ? "無題ノート" : trimmed
+        
+        let request = NoteFile.fetchRequest()
+        if let folder {
+            request.predicate = NSPredicate(format: "folder == %@ AND isTrashed == NO", folder)
+        } else {
+            request.predicate = NSPredicate(format: "folder == nil AND isTrashed == NO")
+        }
+        let existing = (try? context.fetch(request)) ?? []
+        let existingTitles = Set(existing.filter { $0.objectID != ignoringNoteID }.map { $0.title ?? "" })
+        
+        if !existingTitles.contains(title) { return title }
+        
+        var index = 2
+        while existingTitles.contains("\(title) \(index)") {
+            index += 1
+        }
+        return "\(title) \(index)"
+    }
+
     // MARK: - 作成
 
     @discardableResult
     static func createFolder(named name: String, parent: Folder?, in context: NSManagedObjectContext) -> Folder {
+        let uniqueName = uniqueFolderName(base: name, parent: parent, in: context)
         let folder = Folder(context: context)
         folder.id = UUID()
-        folder.name = name.isEmpty ? "新規フォルダ" : name
+        folder.name = uniqueName
         folder.createdAt = .now
         folder.updatedAt = .now
         folder.parent = parent
@@ -31,9 +80,10 @@ enum LibraryService {
         backgroundStyle: CanvasBackgroundStyle = .dots,
         in context: NSManagedObjectContext
     ) -> NoteFile {
+        let uniqueTitle = uniqueNoteTitle(base: title, folder: folder, in: context)
         let note = NoteFile(context: context)
         note.id = UUID()
-        note.title = title.isEmpty ? "無題ノート" : title
+        note.title = uniqueTitle
         note.createdAt = .now
         note.updatedAt = .now
         note.folder = folder
@@ -60,7 +110,8 @@ enum LibraryService {
 
         let note = NoteFile(context: context)
         note.id = UUID()
-        note.title = title.isEmpty ? "PDF ノート" : title
+        let uniqueTitle = uniqueNoteTitle(base: title.isEmpty ? "PDF ノート" : title, folder: folder, in: context)
+        note.title = uniqueTitle
         note.createdAt = .now
         note.updatedAt = .now
         note.folder = folder
@@ -118,10 +169,12 @@ enum LibraryService {
         guard !trimmed.isEmpty else { return }
         switch item {
         case .folder(let folder):
-            folder.name = trimmed
+            let uniqueName = uniqueFolderName(base: trimmed, parent: folder.parent, in: context, ignoringFolderID: folder.objectID)
+            folder.name = uniqueName
             folder.updatedAt = .now
         case .note(let note):
-            note.title = trimmed
+            let uniqueTitle = uniqueNoteTitle(base: trimmed, folder: note.folder, in: context, ignoringNoteID: note.objectID)
+            note.title = uniqueTitle
             note.updatedAt = .now
         }
         save(context)
@@ -136,11 +189,15 @@ enum LibraryService {
             if folder.parent == destination { return }
             // 自分自身・自分の子孫への移動は循環参照になるため禁止
             if let destination, destination == folder || destination.isDescendant(of: folder) { return }
+            let uniqueName = uniqueFolderName(base: folder.name ?? "", parent: destination, in: context, ignoringFolderID: folder.objectID)
+            folder.name = uniqueName
             folder.parent = destination
             folder.updatedAt = .now
         case .note(let note):
             // 既に同じ場所にある場合は no-op(updatedAt を無意味に更新しない)
             if note.folder == destination { return }
+            let uniqueTitle = uniqueNoteTitle(base: note.title ?? "", folder: destination, in: context, ignoringNoteID: note.objectID)
+            note.title = uniqueTitle
             note.folder = destination
             note.updatedAt = .now
         }
@@ -155,6 +212,13 @@ enum LibraryService {
         case .folder(let folder): setTrashed(true, folder: folder)
         case .note(let note): setTrashed(true, note: note)
         }
+        save(context)
+    }
+
+    /// 複数のフォルダおよびノートを一括でゴミ箱へ移動する
+    static func bulkMoveToTrash(folders: [Folder], notes: [NoteFile], in context: NSManagedObjectContext) {
+        for folder in folders { setTrashed(true, folder: folder) }
+        for note in notes { setTrashed(true, note: note) }
         save(context)
     }
 

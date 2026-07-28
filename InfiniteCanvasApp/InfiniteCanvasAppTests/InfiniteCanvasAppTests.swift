@@ -382,6 +382,26 @@ struct OpenNotesSessionTests {
         #expect(session.openNotes == [b])
     }
 
+    @Test("親フォルダがゴミ箱行きのノートのタブも closeTrashedNotes で閉じる")
+    func trashedNotesInTrashedFolderAreClosed() {
+        let context = makeContext()
+        let session = OpenNotesSession()
+        let folder = Folder(context: context)
+        folder.id = UUID()
+        folder.name = "Folder"
+        folder.isTrashed = true
+
+        let noteInFolder = makeNote("InFolder", in: context)
+        noteInFolder.folder = folder
+
+        let safeNote = makeNote("Safe", in: context)
+        session.open(noteInFolder)
+        session.open(safeNote)
+
+        session.closeTrashedNotes()
+        #expect(session.openNotes == [safeNote])
+    }
+
     @Test("ビューポート(スクロール位置・ズーム)が UserDefaults 経由で復元される")
     func viewportRoundTrip() throws {
         let controller = PersistenceController(inMemory: true)
