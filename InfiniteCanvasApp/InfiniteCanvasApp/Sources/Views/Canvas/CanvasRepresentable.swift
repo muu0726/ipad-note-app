@@ -622,6 +622,12 @@ struct CanvasRepresentable: UIViewRepresentable {
         func attach(to container: CanvasContainerUIView) {
             self.container = container
             container.onBoundsChange = { [weak self] in self?.handleBoundsChange() }
+            // オブジェクト上ピンチの補完ズームが確定したら、無限ワールドを再計算(組み込みの
+            // scrollViewDidEndZooming と同じ後処理)。
+            container.onSupplementalZoomEnded = { [weak self] in
+                guard let self, let container = self.container else { return }
+                self.refreshInfiniteWorld(in: container)
+            }
         }
 
         /// 画面回転・Split View のリサイズ等で bounds が変わったとき、通常ノートの
@@ -644,8 +650,8 @@ struct CanvasRepresentable: UIViewRepresentable {
             let scrollView = container.scrollView
             // ピンチズーム中は worldSize/contentView.bounds/原点リベースを一切触らない。
             // ズーム中にワールドを書き換えるとピンチのアンカーがずれるため、確定後
-            // (scrollViewDidEndZooming)にまとめて適用する。
-            guard !scrollView.isZooming else { return }
+            // (scrollViewDidEndZooming / 補完ズーム終了)にまとめて適用する。
+            guard !scrollView.isZooming, !(container.isSupplementalZooming) else { return }
             // スクロール・慣性の最中は原点リベースを保留し、画面の跳ね・引っかかりを防ぐ
             if !scrollView.isDragging && !scrollView.isDecelerating {
                 if let delta = DynamicCanvasBounds.rebaseDelta(contentUnion: parent.infiniteContentUnion) {
@@ -769,8 +775,10 @@ struct CanvasRepresentable: UIViewRepresentable {
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             guard scrollView === container?.scrollView else { return }
-            // ズーム中はクランプしない(アンカーを乱さない)。確定後に scrollViewDidEndZooming で収める。
-            if parent.noteType == .infinite, !scrollView.isZooming {
+            // ズーム中はクランプしない(アンカーを乱さない)。確定後に scrollViewDidEndZooming /
+            // 補完ズーム終了で収める。補完ズーム(オブジェクト上ピンチ)中も焦点を保つため触らない。
+            if parent.noteType == .infinite, !scrollView.isZooming,
+               !(container?.isSupplementalZooming ?? false) {
                 let clamped = clampedInfiniteOffset(scrollView.contentOffset, for: scrollView)
                 if clamped != scrollView.contentOffset { scrollView.contentOffset = clamped }
                 // インク面の窓を可視範囲へ追従(スクロールに合わせて張り替える)
@@ -1206,7 +1214,9 @@ final class FreeformInkCanvasView: PKCanvasView {
     override var accessibilityElements: [Any]? { get { nil } set {} }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        // ① オブジェクト(付箋・テキスト・ボタン等)のタッチは objectLayer へ通す(最優先)
+        // ① オブジェクト(付箋・テキスト・ボタン等)のタッチは objectLayer へ通す(最優先)。
+        //    単指のタップ選択・ドラッグ移動のため。2本指ピンチはここでオブジェクトへ吸われても
+        //    別途 CanvasContainerUIView 側のピンチ補完(handleZoomPinch)がズームを効かせる。
         if let objectLayer {
             let converted = convert(point, to: objectLayer)
             if let hit = objectLayer.hitTest(converted, with: event), hit !== objectLayer {
@@ -1257,6 +1267,18 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
     /// 画面回転・Split View 等で bounds が変わったとき呼ぶ(スクロール制限の再計算用)。
     var onBoundsChange: (() -> Void)?
     private var lastLayoutBoundsSize: CGSize = .zero
+
+    // MARK: - 自前ピンチによる焦点ズーム
+    // UIScrollView 組み込みのピンチは「hitTest がオブジェクト(objectLayer 配下)を返す領域で
+    // 始まると、pinchGestureRecognizer は発火するのにズームを適用しない」ため、オブジェクトの上で
+    // 拡大縮小できない。組み込みピンチは無効化し(init 参照)、コンテナ最上位に付けた自前の
+    // ピンチ認識器で全ズームを焦点ズームとして統一駆動する(空き領域/オブジェクト上を問わず一貫)。
+    /// ピンチ開始時のズーム倍率(このピンチの相対 scale を掛ける基準)。
+    private var pinchStartZoom: CGFloat = 1
+    /// 自前ピンチによるズームが進行中か(スクロールのクランプ/ワールド再計算をこの間は保留する)。
+    private(set) var isSupplementalZooming = false
+    /// ズームが確定したとき(ピンチ終了)に呼ぶ。無限ワールドの再計算に使う。
+    var onSupplementalZoomEnded: (() -> Void)?
 
     /// 選択モード: 選択中の単指ドラッグはオブジェクト移動に使うため、スクロールは2本指に限定。
     var isSelectMode = false {
@@ -1357,6 +1379,16 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
         canvasView.objectLayer = objectLayer
         canvasView.containerScrollView = scrollView
         canvasView.addGestureRecognizer(lassoPan)
+        // ズームは自前のピンチ認識器で焦点ズームを統一駆動する。
+        // UIScrollView 組み込みのピンチは (1) hitTest がオブジェクトを返す領域では発火しても
+        // ズームを適用しない (2) `scale` を内部で書き換えるため相乗り制御が破綻する、の2点で
+        // オブジェクト上ピンチに使えない。組み込みピンチは無効化し、コンテナ最上位に付けた
+        // 認識器(=どのビュー上のタッチも受け取れる)で scrollView.zoomScale を直接動かす。
+        scrollView.pinchGestureRecognizer?.isEnabled = false
+        let zoomPinch = UIPinchGestureRecognizer(target: self, action: #selector(handleZoomPinch(_:)))
+        zoomPinch.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]  // 指のみ(Pencil=描画)
+        zoomPinch.delegate = self
+        addGestureRecognizer(zoomPinch)
 
         scrollView.addSubview(canvasView)  // contentView より後 = 最前面(scrollView 直下)
 
@@ -1378,6 +1410,46 @@ final class CanvasContainerUIView: UIView, UIGestureRecognizerDelegate {
             lastLayoutBoundsSize = bounds.size
             onBoundsChange?()
         }
+    }
+
+    /// 自前ピンチによる焦点ズーム。2本指の中点(pivot)を画面上に固定したまま、開始時倍率 ×
+    /// このピンチの相対 scale を目標倍率にする。オブジェクト上でも空き領域でも一貫して動く。
+    @objc private func handleZoomPinch(_ g: UIPinchGestureRecognizer) {
+        switch g.state {
+        case .began:
+            pinchStartZoom = scrollView.zoomScale
+            isSupplementalZooming = true
+        case .changed:
+            guard g.numberOfTouches >= 2, g.scale.isFinite, g.scale > 0 else { return }
+            let target = max(scrollView.minimumZoomScale,
+                             min(scrollView.maximumZoomScale, pinchStartZoom * g.scale))
+            applyFocalZoom(to: target, pivot: g.location(in: scrollView))
+        case .ended, .cancelled, .failed:
+            if isSupplementalZooming {
+                isSupplementalZooming = false
+                onSupplementalZoomEnded?()
+            }
+        default:
+            break
+        }
+    }
+
+    /// 2本指の中点を画面上で固定したまま zoomScale を target にする(焦点ズーム)。
+    /// - pivot: `location(in: scrollView)` の点。scrollView 座標系 = スケール済みコンテンツ座標で、
+    ///   可視域は `[contentOffset, contentOffset + viewport]`(pivot は既に contentOffset を含む)。
+    private func applyFocalZoom(to target: CGFloat, pivot: CGPoint) {
+        let old = scrollView.zoomScale
+        guard old > 0, target.isFinite, abs(target - old) > 0.0001 else { return }
+        let off0 = scrollView.contentOffset
+        // 指の「画面(ビューポート)上の位置」と、その直下の「非ズームのコンテンツ点」。
+        let screen = CGPoint(x: pivot.x - off0.x, y: pivot.y - off0.y)
+        let unscaled = CGPoint(x: pivot.x / old, y: pivot.y / old)
+        scrollView.zoomScale = target   // scrollViewDidZoom が発火しミラー(背景/ink/オブジェクト)追従
+        // ズーム後も同じコンテンツ点が同じ画面位置に来るよう offset を決める。
+        let newOffset = CGPoint(x: unscaled.x * target - screen.x,
+                                y: unscaled.y * target - screen.y)
+        guard newOffset.x.isFinite, newOffset.y.isFinite else { return }
+        scrollView.contentOffset = newOffset
     }
 
     @objc private func handleBackgroundTap(_ gesture: UITapGestureRecognizer) {
