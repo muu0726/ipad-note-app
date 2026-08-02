@@ -4,3 +4,11 @@ DerivedData/
 TestResults/
 tasks/
 
+# 秘密情報（Supabase URL/キー等）。テンプレートの .env.example のみコミットする
+.env
+.env.*
+!.env.example
+
+# iPad アプリの Supabase 接続設定（実値）。example のみコミットする
+SupabaseConfig.plist
+

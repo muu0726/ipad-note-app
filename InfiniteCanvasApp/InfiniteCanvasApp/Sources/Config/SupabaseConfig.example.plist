@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Supabase 接続設定テンプレート。
+  使い方: このファイルを同じフォルダに SupabaseConfig.plist としてコピーし、
+          ルート .env / Supabase ダッシュボードの値を埋める。
+  SupabaseConfig.plist は .gitignore 済み（実値をコミットしない）。
+  anon key のみを置く。service_role key はアプリに絶対含めない（MCP 専用）。
+-->
+<plist version="1.0">
+<dict>
+	<key>SUPABASE_URL</key>
+	<string></string>
+	<key>SUPABASE_ANON_KEY</key>
+	<string></string>
+</dict>
+</plist>
